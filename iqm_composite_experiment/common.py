@@ -136,31 +136,95 @@ def prx_impl(builder: Any, qubit: str, config: Config) -> Any:
         "prx", [qubit], impl_name=config.prx_implementation,
     )
 
-
-def add_detuning(
-    builder: Any, qubit: str, box: TimeBox, detuning_hz: float,
-) -> TimeBox:
-    """Apply detuning only to the IQ pulse in this PRX TimeBox."""
+def _single_iq_pulse(
+    builder: Any,
+    qubit: str,
+    box: TimeBox,
+) -> tuple[str, Any, list[Any], int]:
+    """Extract the single IQPulse from a calibrated PRX TimeBox."""
     drive = builder.get_drive_channel(qubit)
     schedule = deepcopy(box.atom)
     instructions = list(schedule[drive])
+
     indices = [
-        i for i, instruction in enumerate(instructions)
+        i
+        for i, instruction in enumerate(instructions)
         if isinstance(instruction, IQPulse)
     ]
+
     if len(indices) != 1:
         raise ValueError(
             f"PRX on {qubit} contains {len(indices)} IQPulse instructions. "
             "Choose a calibrated single-pulse PRX implementation in Config."
         )
-    offset = detuning_hz / float(builder.channels[drive].sample_rate)
-    i = indices[0]
-    instructions[i] = replace(
-        instructions[i],
-        modulation_frequency=instructions[i].modulation_frequency + offset,
+
+    return drive, schedule, instructions, indices[0]
+
+
+def add_amplitude_error(
+    builder: Any,
+    qubit: str,
+    box: TimeBox,
+    amplitude_error: float,
+) -> TimeBox:
+    """
+    Apply a relative amplitude error directly to the calibrated IQ pulse.
+
+    amplitude_error = 0.1  -> +10% amplitude
+    amplitude_error = -0.1 -> -10% amplitude
+    """
+    drive, schedule, instructions, i = _single_iq_pulse(
+        builder,
+        qubit,
+        box,
     )
+
+    pulse = instructions[i]
+
+    instructions[i] = replace(
+        pulse,
+        scale_i=pulse.scale_i * (1.0 + amplitude_error),
+        scale_q=pulse.scale_q * (1.0 + amplitude_error),
+    )
+
     schedule[drive] = Segment(instructions)
-    return TimeBox.atomic(schedule, locus_components=(qubit,), label="detuned_prx")
+
+    return TimeBox.atomic(
+        schedule,
+        locus_components=(qubit,),
+        label="amplitude_error_prx",
+    )
+
+
+def add_detuning(
+    builder: Any,
+    qubit: str,
+    box: TimeBox,
+    detuning_hz: float,
+) -> TimeBox:
+    """Apply detuning only to the IQ pulse in this PRX TimeBox."""
+    drive, schedule, instructions, i = _single_iq_pulse(
+        builder,
+        qubit,
+        box,
+    )
+
+    pulse = instructions[i]
+
+    offset = detuning_hz / float(builder.channels[drive].sample_rate)
+
+    instructions[i] = replace(
+        pulse,
+        modulation_frequency=pulse.modulation_frequency + offset,
+    )
+
+    schedule[drive] = Segment(instructions)
+
+    return TimeBox.atomic(
+        schedule,
+        locus_components=(qubit,),
+        label="detuned_prx",
+    )
 
 
 def calibrated_prx(
@@ -170,7 +234,10 @@ def calibrated_prx(
     phase: float,
     config: Config,
 ) -> TimeBox:
-    return prx_impl(builder, qubit, config)(float(angle), float(phase))
+    return prx_impl(builder, qubit, config)(
+        float(angle),
+        float(phase),
+    )
 
 
 def erroneous_prx(
@@ -178,11 +245,35 @@ def erroneous_prx(
     qubit: str,
     angle: float,
     phase: float,
+    amplitude_error: float,
     detuning_hz: float,
     config: Config,
 ) -> TimeBox:
-    box = calibrated_prx(builder, qubit, angle, phase, config)
-    return add_detuning(builder, qubit, box, detuning_hz)
+    # Always construct the nominal calibrated rotation.
+    box = calibrated_prx(
+        builder,
+        qubit,
+        angle,
+        phase,
+        config,
+    )
+
+    # Inject errors into the calibrated physical pulse.
+    box = add_amplitude_error(
+        builder,
+        qubit,
+        box,
+        amplitude_error,
+    )
+
+    box = add_detuning(
+        builder,
+        qubit,
+        box,
+        detuning_hz,
+    )
+
+    return box
 
 
 def composite_gate(
@@ -193,12 +284,18 @@ def composite_gate(
     detuning_hz: float,
     config: Config,
 ) -> TimeBox:
-    angle = sequence.constituent_angle * (1 + amplitude_error)
     return serial(
-        erroneous_prx(builder, qubit, angle, phase, detuning_hz, config)
+        erroneous_prx(
+            builder=builder,
+            qubit=qubit,
+            angle=sequence.constituent_angle,
+            phase=phase,
+            amplitude_error=amplitude_error,
+            detuning_hz=detuning_hz,
+            config=config,
+        )
         for phase in sequence.phases
     )
-
 
 def as_timebox(box_or_boxes: Any) -> TimeBox:
     if isinstance(box_or_boxes, TimeBox):
