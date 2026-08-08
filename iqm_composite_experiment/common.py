@@ -13,13 +13,7 @@ from iqm.pulse.playlist.instructions import IQPulse
 from iqm.pulse.playlist.schedule import Segment
 from iqm.pulse.timebox import TimeBox
 
-
-@dataclass(frozen=True)
-class SequenceSpec:
-    name: str
-    target_angle: float
-    constituent_angle: float
-    phases: tuple[float, ...]
+from sequences import SequenceSpec, built_in_sequences
 
 
 @dataclass(frozen=True)
@@ -54,59 +48,6 @@ class ReadoutCalibration:
 class Clifford:
     unitary: np.ndarray
     pulses: tuple[tuple[float, float], ...]
-
-
-def built_in_sequences() -> dict[str, SequenceSpec]:
-    """Phase lists available in the supplied manuscript excerpt."""
-    theta = math.acos(-math.sqrt(3) / 4)
-    return {
-        "X1": SequenceSpec("X1", np.pi, np.pi, (0.0,)),
-        "X5a": SequenceSpec(
-            "X5a", np.pi, np.pi,
-            (2*np.pi/3, 11*np.pi/6, np.pi/3, 11*np.pi/6, 2*np.pi/3),
-        ),
-        "X5b": SequenceSpec(
-            "X5b", np.pi, np.pi,
-            (2*np.pi/3, 5*np.pi/6, np.pi/3, 5*np.pi/6, 2*np.pi/3),
-        ),
-        "X9a": SequenceSpec(
-            "X9a", np.pi, np.pi,
-            (
-                np.pi/3,
-                5*np.pi/12-theta/2,
-                7*np.pi/6-theta,
-                17*np.pi/12-theta/2,
-                2*np.pi/3,
-                17*np.pi/12-theta/2,
-                7*np.pi/6-theta,
-                5*np.pi/12-theta/2,
-                np.pi/3,
-            ),
-        ),
-        "X9b": SequenceSpec(
-            "X9b", np.pi, np.pi,
-            (
-                np.pi/3,
-                5*np.pi/12+theta/2,
-                7*np.pi/6+theta,
-                17*np.pi/12+theta/2,
-                2*np.pi/3,
-                17*np.pi/12+theta/2,
-                7*np.pi/6+theta,
-                5*np.pi/12+theta/2,
-                np.pi/3,
-            ),
-        ),
-        "H1": SequenceSpec("H1", np.pi/2, np.pi/2, (0.0,)),
-        "H11a": SequenceSpec(
-            "H11a", np.pi/2, np.pi/2,
-            (
-                0.777941, 0.518699, 0.660394, 0.877660, 0.525243,
-                0.273513, 0.525243, 0.877660, 0.660394, 0.518699,
-                0.777941,
-            ),
-        ),
-    }
 
 
 def prx_matrix(angle: float, phase: float) -> np.ndarray:
