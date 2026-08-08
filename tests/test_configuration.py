@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from iqm_composite_experiment.backend.iqm import ProbabilitySource
-from iqm_composite_experiment.configuration import load_application_configuration
+from gate_experiment.backend.iqm import ProbabilitySource
+from gate_experiment.configuration import load_application_configuration
 
 
 ROOT = Path(__file__).resolve().parents[1]

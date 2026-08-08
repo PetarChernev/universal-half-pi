@@ -10,16 +10,16 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from iqm_composite_experiment.backend.base import BackendSession, ExperimentBackend
-from iqm_composite_experiment.models.acquisition import (
+from gate_experiment.backend.base import BackendSession, ExperimentBackend
+from gate_experiment.models.acquisition import (
     AcquisitionPlan,
     Locus,
     MeasurementData,
     ProbabilityData,
 )
-from iqm_composite_experiment.models.parameters import ParameterSet
-from iqm_composite_experiment.targets.base import OperationUnderTest
-from iqm_composite_experiment.targets.composite import prx_unitary
+from gate_experiment.models.parameters import ParameterSet
+from gate_experiment.targets.base import OperationUnderTest
+from gate_experiment.targets.composite import prx_unitary
 
 
 class MatrixCircuitFactory:

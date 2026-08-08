@@ -8,9 +8,9 @@ from pathlib import Path
 
 from iqm.pulla.pulla import Pulla
 
-from iqm_composite_experiment.backend.iqm import IQMBackend
-from iqm_composite_experiment.configuration import load_application_configuration
-from iqm_composite_experiment.experiment import ExperimentRunner
+from gate_experiment.backend.iqm import IQMBackend
+from gate_experiment.configuration import load_application_configuration
+from gate_experiment.experiment import ExperimentRunner
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 

@@ -45,7 +45,7 @@ class OperationUnderTest(ABC):
 
     Subclasses contain scientific intent and implementation parameters only.
     Hardware realization is delegated to a backend-specific
-    :class:`~iqm_composite_experiment.backend.base.OperationCompiler`.
+    :class:`~gate_experiment.backend.base.OperationCompiler`.
     """
 
     operation_id: str

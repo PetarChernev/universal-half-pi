@@ -6,9 +6,9 @@ import unittest
 
 import numpy as np
 
-from iqm_composite_experiment.backend.iqm.decoder import IQMDatasetDecoder, ProbabilitySource
-from iqm_composite_experiment.models.acquisition import AcquisitionPlan, PlannedCircuit
-from iqm_composite_experiment.readout import BinaryReadoutCalibration
+from gate_experiment.backend.iqm.decoder import IQMDatasetDecoder, ProbabilitySource
+from gate_experiment.models.acquisition import AcquisitionPlan, PlannedCircuit
+from gate_experiment.readout import BinaryReadoutCalibration
 
 
 class FakeDataArray:

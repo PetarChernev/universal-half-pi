@@ -7,14 +7,14 @@ import unittest
 
 import numpy as np
 
-from iqm_composite_experiment.backend.base import OperationCompiler, OperationCompilerRegistry
-from iqm_composite_experiment.experiment import CharacterizationExperiment, ExperimentRunner
-from iqm_composite_experiment.models.acquisition import Locus
-from iqm_composite_experiment.models.parameters import ParameterSet, ParameterSpec
-from iqm_composite_experiment.models.points import PointSet, SweepAxis
-from iqm_composite_experiment.targets.base import IdealOperation, OperationUnderTest
-from iqm_composite_experiment.targets.composite import prx_unitary
-from iqm_composite_experiment.techniques import ProcessTomography
+from gate_experiment.backend.base import OperationCompiler, OperationCompilerRegistry
+from gate_experiment.experiment import CharacterizationExperiment, ExperimentRunner
+from gate_experiment.models.acquisition import Locus
+from gate_experiment.models.parameters import ParameterSet, ParameterSpec
+from gate_experiment.models.points import PointSet, SweepAxis
+from gate_experiment.targets.base import IdealOperation, OperationUnderTest
+from gate_experiment.targets.composite import prx_unitary
+from gate_experiment.techniques import ProcessTomography
 
 from tests.fakes import MatrixBackend
 

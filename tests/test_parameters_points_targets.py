@@ -6,11 +6,11 @@ import unittest
 
 import numpy as np
 
-from iqm_composite_experiment.models.parameters import ParameterSet
-from iqm_composite_experiment.models.points import ExperimentPoint, PointSet, SweepAxis
-from iqm_composite_experiment.targets.base import IdealOperation
-from iqm_composite_experiment.targets.composite import UniversalCompositePulse, prx_unitary
-from iqm_composite_experiment.targets.universal import universal_composite_pulses
+from gate_experiment.models.parameters import ParameterSet
+from gate_experiment.models.points import ExperimentPoint, PointSet, SweepAxis
+from gate_experiment.targets.base import IdealOperation
+from gate_experiment.targets.composite import UniversalCompositePulse, prx_unitary
+from gate_experiment.targets.universal import universal_composite_pulses
 
 
 class ParameterAndTargetTests(unittest.TestCase):

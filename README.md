@@ -27,7 +27,7 @@ constructs `Pulla` and opens a backend session.
 Framework objects can also be assembled directly in a notebook:
 
 ```python
-from iqm_composite_experiment import (
+from gate_experiment import (
     CharacterizationExperiment,
     ExperimentSettings,
     PointSet,
@@ -57,8 +57,8 @@ Execution is deliberately separate from this scientific definition:
 
 ```python
 from iqm.pulla.pulla import Pulla
-from iqm_composite_experiment.backend.iqm import IQMBackend
-from iqm_composite_experiment.experiment import ExperimentRunner
+from gate_experiment.backend.iqm import IQMBackend
+from gate_experiment.experiment import ExperimentRunner
 
 pulla = Pulla("https://your-iqm-server")
 result = ExperimentRunner(IQMBackend(pulla)).run(experiment)

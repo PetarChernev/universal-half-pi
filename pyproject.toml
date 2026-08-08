@@ -22,7 +22,7 @@ where = ["src"]
 
 [tool.coverage.run]
 branch = true
-source = ["iqm_composite_experiment"]
+source = ["gate_experiment"]
 
 [tool.coverage.report]
 show_missing = true

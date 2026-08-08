@@ -6,23 +6,23 @@ import unittest
 
 import numpy as np
 
-from iqm_composite_experiment.models.acquisition import MeasurementData, ProbabilityData
-from iqm_composite_experiment.models.parameters import ParameterSet
-from iqm_composite_experiment.models.points import ExperimentPoint
-from iqm_composite_experiment.targets.universal import universal_composite_pulses
-from iqm_composite_experiment.techniques.base import TechniqueContext
-from iqm_composite_experiment.techniques.ramsey import (
+from gate_experiment.models.acquisition import MeasurementData, ProbabilityData
+from gate_experiment.models.parameters import ParameterSet
+from gate_experiment.models.points import ExperimentPoint
+from gate_experiment.targets.universal import universal_composite_pulses
+from gate_experiment.techniques.base import TechniqueContext
+from gate_experiment.techniques.ramsey import (
     TransitionPhaseRamsey,
     fit_fringe,
     ideal_ramsey_p1,
 )
-from iqm_composite_experiment.techniques.randomized_benchmarking import (
+from gate_experiment.techniques.randomized_benchmarking import (
     InterleavedRandomizedBenchmarking,
     RBSettings,
     clifford_group,
     fit_decay,
 )
-from iqm_composite_experiment.techniques.tomography import (
+from gate_experiment.techniques.tomography import (
     ProcessTomography,
     reconstruct_ptm,
     tomography_metrics,

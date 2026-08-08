@@ -6,8 +6,8 @@ import unittest
 
 import numpy as np
 
-from iqm_composite_experiment.backend.iqm import IQMBackend
-from iqm_composite_experiment.models.acquisition import AcquisitionPlan, PlannedCircuit
+from gate_experiment.backend.iqm import IQMBackend
+from gate_experiment.models.acquisition import AcquisitionPlan, PlannedCircuit
 
 from tests.test_readout_decoder import FakeDataArray, FakeDataset
 

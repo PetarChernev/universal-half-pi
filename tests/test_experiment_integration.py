@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import unittest
 
-from iqm_composite_experiment.experiment import (
+from gate_experiment.experiment import (
     CharacterizationExperiment,
     ExperimentRunner,
     ExperimentSettings,
     FailurePolicy,
 )
-from iqm_composite_experiment.models.acquisition import AcquisitionPlan, MeasurementData
-from iqm_composite_experiment.models.points import PointSet
-from iqm_composite_experiment.models.results import ResultStatus, TechniqueResult
-from iqm_composite_experiment.readout import IndependentReadoutCorrection
-from iqm_composite_experiment.targets.universal import universal_composite_pulses
-from iqm_composite_experiment.techniques.base import CharacterizationTechnique, TechniqueContext
-from iqm_composite_experiment.techniques import ProcessTomography, TransitionPhaseRamsey
+from gate_experiment.models.acquisition import AcquisitionPlan, MeasurementData
+from gate_experiment.models.points import PointSet
+from gate_experiment.models.results import ResultStatus, TechniqueResult
+from gate_experiment.readout import IndependentReadoutCorrection
+from gate_experiment.targets.universal import universal_composite_pulses
+from gate_experiment.techniques.base import CharacterizationTechnique, TechniqueContext
+from gate_experiment.techniques import ProcessTomography, TransitionPhaseRamsey
 
 from tests.fakes import MatrixBackend
 
