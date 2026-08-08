@@ -46,7 +46,7 @@ class SequenceSpec:
 @dataclass(frozen=True)
 class Config:
     qubits: tuple[str, ...] | None = None
-    amplitude_errors: tuple[float, ...] = (0.0)
+    amplitude_errors: tuple[float, ...] = (0.0,)
     detunings_hz: tuple[float, ...] = (-2e6, 0.0, 2e6)
     ramsey_phases: tuple[float, ...] = tuple(np.linspace(0, 2 * np.pi, 5)[:-1])
     tomography_shots: int = 50
