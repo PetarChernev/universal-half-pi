@@ -206,7 +206,7 @@ def run_batch(
     )
     job = pulla.submit_playlist(run_definition, context=context)
     job.wait_for_completion()
-    return job.result(compiler).dataset
+    return job.result(compiler=compiler).dataset
 
 
 def p1_from_dataset(dataset: Any, qubit: str, key: str) -> np.ndarray:
@@ -232,7 +232,7 @@ def prx_impl(builder: Any, qubit: str, config: Config) -> Any:
     if config.prx_implementation is None:
         return builder.prx([qubit])
     return builder.get_implementation(
-        "prx", [qubit], implementation=config.prx_implementation
+        "prx", [qubit], impl_name=config.prx_implementation
     )
 
 
@@ -300,6 +300,24 @@ def composite_gate(
         for phase in sequence.phases
     )
 
+def as_timebox(box_or_boxes: Any) -> TimeBox:
+    """Convert a gate implementation result into one TimeBox."""
+    if isinstance(box_or_boxes, TimeBox):
+        return box_or_boxes
+
+    boxes = list(box_or_boxes)
+
+    if not boxes:
+        raise ValueError("Gate implementation returned no TimeBoxes.")
+
+    if not all(isinstance(box, TimeBox) for box in boxes):
+        raise TypeError(
+            "Expected TimeBox or iterable of TimeBoxes, got "
+            f"{type(box_or_boxes).__name__}"
+        )
+
+    return TimeBox.composite(boxes)
+
 
 def measured_parallel_circuit(
     builder: Any,
@@ -307,10 +325,20 @@ def measured_parallel_circuit(
     operations: dict[str, list[TimeBox]],
     key: str,
 ) -> TimeBox:
-    active = [serial(operations[q]) for q in qubits if operations[q]]
-    measurement = builder.measure(qubits)(key=key)
-    return parallel(active) | measurement if active else measurement
+    active = [
+        serial(operations[q])
+        for q in qubits
+        if operations[q]
+    ]
 
+    measurement = as_timebox(
+        builder.measure(qubits)(key=key)
+    )
+
+    if active:
+        return parallel(active) | measurement
+
+    return measurement
 
 # =============================================================================
 # Readout calibration
@@ -326,7 +354,7 @@ def readout_calibration(
     if not config.readout_correction:
         return {q: None for q in qubits}
 
-    builder = compiler.builder
+    builder = compiler.get_schedule_builder()
     ground = {q: [] for q in qubits}
     excited = {q: [calibrated_prx(builder, q, np.pi, 0, config)] for q in qubits}
     dataset = run_batch(
@@ -391,7 +419,7 @@ def acquire_tomography(
     detuning_hz: float,
     config: Config,
 ) -> tuple[Any, list[tuple[str, str]]]:
-    builder = compiler.builder
+    builder = compiler.get_schedule_builder()
     circuits, metadata = [], []
 
     for state in TOMO_INPUTS:
@@ -486,7 +514,7 @@ def acquire_ramsey(
     detuning_hz: float,
     config: Config,
 ) -> Any:
-    builder = compiler.builder
+    builder = compiler.get_schedule_builder()
     circuits = []
 
     for phase in config.ramsey_phases:
@@ -635,7 +663,7 @@ def acquire_rb(
     detuning_hz: float,
     config: Config,
 ) -> tuple[Any, list[dict[str, Any]]]:
-    builder = compiler.builder
+    builder = compiler.get_schedule_builder()
     plan, group = rb_plan(sequence, config)
     circuits = []
 
