@@ -1,6 +1,0 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.coverage
-htmlcov/
-composite_experiment_results.csv
