@@ -22,12 +22,24 @@ ResultValue: TypeAlias = str | int | float | bool
 
 
 def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Dataset:
+    """Acquire a phase-scanned Ramsey fringe for one sequence/error setting.
+
+    Each circuit applies the composite gate followed by a calibrated pi/2
+    analysis pulse whose phase is taken from ``config.ramsey_phases``.  A pi
+    target receives an initial calibrated pi/2 pulse so that the gate acts on
+    an equatorial state and its transition phase remains observable.
+
+    The returned dataset contains one circuit result per analysis phase, in
+    the same order as ``config.ramsey_phases``.
+    """
     builder = compiler.get_schedule_builder()
     circuits: list[TimeBox] = []
     for phase in config.ramsey_phases:
         operations: dict[str, list[TimeBox]] = {}
         for q in qubits:
             ops: list[TimeBox] = []
+            # A pi rotation maps |0> to a pole, where an azimuthal phase cannot
+            # be observed.  The preparation pulse moves the input to the equator.
             if abs(sequence.target_angle - np.pi) < 1e-6:
                 ops.append(calibrated_prx(builder, q, np.pi / 2, 0, config))
             ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
@@ -38,6 +50,12 @@ def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: S
 
 
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    """Run Ramsey characterization over all configured sweeps and qubits.
+
+    Raw datasets and acquisition metadata are persisted before readout-corrected
+    fringes are fitted.  The returned table has one row per sequence, amplitude
+    error, detuning, and qubit combination.
+    """
     rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
@@ -70,6 +88,9 @@ def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequ
                 for q in qubits:
                     row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
                     calibration = readout[q]
+                    # Readout correction amplifies binomial noise by the inverse
+                    # confusion-matrix contrast; carry that factor into the
+                    # conservative fringe-identifiability estimate.
                     readout_scale = 1.0 if calibration is None else 1.0 / abs(
                         1 - calibration.p1_given_0 - calibration.p0_given_1
                     )
@@ -86,6 +107,13 @@ def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequ
 
 
 def fit_fringe(phases: Sequence[float], p1: Sequence[float]) -> dict[str, float]:
+    """Fit ``P(1) = offset + cosine*cos(phase) + sine*sin(phase)``.
+
+    The model is linear in its three coefficients, so ordinary least squares
+    gives the fringe amplitude, phase, visibility, and fit residual without a
+    nonlinear optimizer.  At least three linearly independent phase samples
+    are required.
+    """
     phases = np.asarray(phases)
     design = np.column_stack([np.ones(len(phases)), np.cos(phases), np.sin(phases)])
     if np.linalg.matrix_rank(design) < 3:
@@ -109,6 +137,12 @@ def ideal_p1(
     sequence: SequenceSpec,
     phases: Sequence[float],
 ) -> npt.NDArray[np.float64]:
+    """Calculate the ideal target-gate Ramsey probabilities.
+
+    This mirrors the acquisition circuit but replaces the physical composite
+    gate by its ideal x-axis rotation.  The result establishes the zero-error
+    fringe phase in the IQM analysis-pulse convention.
+    """
     state = np.array([1.0, 0.0], dtype=complex)
     if abs(sequence.target_angle - np.pi) < 1e-6:
         state = prx_matrix(np.pi / 2, 0) @ state
@@ -123,11 +157,33 @@ def metrics(
     shots: int,
     readout_scale: float = 1.0,
 ) -> dict[str, float | bool]:
+    """Extract Ramsey fringe diagnostics and transition-phase error.
+
+    The measured fringe phase is compared with the ideal circuit phase and
+    wrapped to ``[-pi, pi)``.  A pi target divides the displacement by two;
+    other supported targets use it directly.  Transition phase is reported
+    only when the fitted quadrature amplitude exceeds three times a
+    conservative shot-noise bound.
+
+    Args:
+        p1: Readout-corrected excited-state probabilities, ordered by ``phases``.
+        sequence: Composite sequence whose ideal target defines the reference.
+        phases: Analysis-pulse phases in radians.
+        shots: Number of shots used for each phase point.
+        readout_scale: Noise amplification caused by readout correction.
+
+    Returns:
+        Fitted fringe values, phase uncertainty diagnostics, and transition
+        phase error in radians.
+    """
     measured = fit_fringe(phases, p1)
     ideal = fit_fringe(phases, ideal_p1(sequence, phases))
     shift = wrap(measured["phase"] - ideal["phase"])
     divisor = 2 if abs(sequence.target_angle - np.pi) < 1e-6 else 1
     design = np.column_stack([np.ones(len(phases)), np.cos(phases), np.sin(phases)])
+    # P(1) has binomial variance no greater than 1/4 per shot.  Propagating
+    # that worst-case variance through linear least squares bounds the two
+    # fitted quadrature coefficients' covariance.
     covariance_bound = (
         (0.25 * readout_scale**2 / shots)
         * np.linalg.inv(design.T @ design)
@@ -135,6 +191,7 @@ def metrics(
     coefficient_noise = float(np.sqrt(np.linalg.eigvalsh(covariance_bound[1:, 1:]).max()))
     phase_identifiable = measured["fringe_amplitude"] > 3 * coefficient_noise
     if measured["fringe_amplitude"] > 0:
+        # Delta-method propagation through atan2(sine, cosine).
         gradient = np.array([
             -measured["sine_coefficient"],
             measured["cosine_coefficient"],

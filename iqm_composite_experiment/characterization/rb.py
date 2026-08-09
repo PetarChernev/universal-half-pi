@@ -37,6 +37,8 @@ from dataset_persistence import persist_dataset
 
 
 class RBPlanItem(TypedDict):
+    """Description of one reference or interleaved RB circuit."""
+
     kind: Literal["reference", "interleaved"]
     length: int
     sample: int
@@ -48,6 +50,14 @@ ResultValue: TypeAlias = str | int | float | bool
 
 
 def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Dataset, list[RBPlanItem]]:
+    """Acquire reference and interleaved RB circuits for one sweep point.
+
+    Reference circuits contain random single-qubit Cliffords followed by their
+    recovery.  Interleaved circuits use the same random Cliffords, insert the
+    physical composite gate after each one, and use a recovery computed from
+    the sequence's ideal target.  The returned plan maps every dataset entry to
+    its circuit kind, length, sample, random indices, and recovery.
+    """
     builder = compiler.get_schedule_builder()
     rb_plan, group = plan(sequence, config)
     circuits: list[TimeBox] = []
@@ -58,6 +68,8 @@ def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: S
             for i in item["indices"]:
                 ops += clifford_pulses(builder, q, group[i], config)
                 if item["kind"] == "interleaved":
+                    # Only the gate under test receives the requested systematic
+                    # error; the surrounding Clifford pulses stay calibrated.
                     ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
             ops += clifford_pulses(builder, q, group[item["recovery"]], config)
             operations[q] = ops
@@ -66,6 +78,12 @@ def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: S
 
 
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    """Run interleaved RB over all configured sequences and error settings.
+
+    Each acquisition is persisted with the complete random-circuit plan so it
+    can be reproduced.  Readout-corrected results are reduced to one row of
+    reference, interleaved, and inferred gate-decay metrics per qubit.
+    """
     rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
@@ -104,12 +122,20 @@ def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequ
 
 
 def clifford_group() -> tuple[Clifford, ...]:
+    """Generate the 24 single-qubit Cliffords and calibrated pulse words.
+
+    Breadth-first expansion by positive x and y pi/2 generators gives a short
+    PRX decomposition for every group element.  Unitaries that differ only by
+    global phase are treated as the same Clifford.
+    """
     generators = (
         (prx_matrix(np.pi / 2, 0), (np.pi / 2, 0)),
         (prx_matrix(np.pi / 2, np.pi / 2), (np.pi / 2, np.pi / 2)),
     )
     group = [Clifford(np.eye(2, dtype=complex), tuple())]
     queue = [0]
+    # Breadth-first traversal preserves the first, and therefore shortest,
+    # generator word found for each Clifford.
     while queue and len(group) < 24:
         current = group[queue.pop(0)]
         for unitary, pulse in generators:
@@ -127,6 +153,12 @@ def clifford_index(
     unitary: npt.NDArray[np.complex128],
     group: Sequence[Clifford],
 ) -> int:
+    """Return the index of a unitary in ``group``, ignoring global phase.
+
+    Raises:
+        ValueError: If ``unitary`` is not represented by the single-qubit
+            Clifford group.
+    """
     for i, element in enumerate(group):
         if same_unitary(unitary, element.unitary, atol=1e-7):
             return i
@@ -139,6 +171,7 @@ def clifford_pulses(
     element: Clifford,
     config: Config,
 ) -> list[TimeBox]:
+    """Build the calibrated PRX pulse decomposition of one Clifford."""
     return [calibrated_prx(builder, q, angle, phase, config) for angle, phase in element.pulses]
 
 
@@ -146,8 +179,21 @@ def plan(
     sequence: SequenceSpec,
     config: Config,
 ) -> tuple[list[RBPlanItem], tuple[Clifford, ...]]:
+    """Create reproducible reference/interleaved RB circuit descriptions.
+
+    For each configured length and random sample, both variants share the same
+    random Clifford indices.  Their recovery Cliffords invert the respective
+    ideal accumulated unitary.  The composite target must itself be a
+    single-qubit Clifford so that every interleaved recovery belongs to the
+    generated group.
+
+    Returns:
+        The ordered circuit plan and the Clifford group indexed by that plan.
+    """
     group = clifford_group()
     target = prx_matrix(sequence.target_angle, 0)
+    # Fail before generating circuits if interleaved Clifford recovery is not
+    # defined for the selected ideal target.
     clifford_index(target, group)
     rng = np.random.default_rng(config.seed)
     result: list[RBPlanItem] = []
@@ -155,12 +201,15 @@ def plan(
         for sample in range(config.rb_samples):
             indices = [int(index) for index in rng.integers(0, 24, size=length)]
             total = np.eye(2, dtype=complex)
+            # Pulses execute left-to-right, so each new unitary multiplies the
+            # accumulated operation from the left.
             for i in indices:
                 total = group[i].unitary @ total
             reference_recovery = clifford_index(total.conj().T, group)
             total = np.eye(2, dtype=complex)
             for i in indices:
                 total = group[i].unitary @ total
+                # Acquisition inserts the gate immediately after this Clifford.
                 total = target @ total
             interleaved_recovery = clifford_index(total.conj().T, group)
             result += [
@@ -177,10 +226,17 @@ def decay_model(
     p: float,
     b: float,
 ) -> npt.NDArray[np.float64]:
+    """Evaluate the RB survival model ``A * p**length + B``."""
     return a * p ** length + b
 
 
 def fit_decay(lengths: Sequence[int], survival: Sequence[float]) -> dict[str, float]:
+    """Fit a bounded exponential to mean ground-state survival values.
+
+    The amplitude, decay, and offset are constrained to ``[0, 1]``.  Returned
+    diagnostics include covariance-derived parameter standard errors and the
+    root-mean-square fit residual.
+    """
     x = np.asarray(lengths, dtype=float)
     y = np.asarray(survival, dtype=float)
     parameters, covariance = curve_fit(
@@ -207,6 +263,14 @@ def metrics(
     p1: npt.NDArray[np.float64],
     rb_plan: Sequence[RBPlanItem],
 ) -> dict[str, float | bool]:
+    """Infer composite-gate error from reference and interleaved RB decays.
+
+    ``p1`` is converted to ground-state survival and averaged across random
+    samples at each length.  Independent exponential fits produce
+    ``p_reference`` and ``p_interleaved``; their ratio estimates the decay of
+    one composite-gate application, and ``(1 - ratio) / 2`` is the reported
+    single-qubit RB infidelity.
+    """
     grouped: dict[tuple[str, int], list[float]] = {}
     for probability, item in zip(p1, rb_plan, strict=True):
         grouped.setdefault((item["kind"], item["length"]), []).append(
@@ -224,6 +288,7 @@ def metrics(
         p_gate_standard_error = float("nan")
     else:
         p_gate = p_interleaved / p_reference
+        # First-order propagation for a ratio of independent fitted decays.
         p_gate_standard_error = float(np.hypot(
             interleaved_fit["decay_standard_error"] / p_reference,
             p_interleaved * reference_fit["decay_standard_error"] / p_reference**2,

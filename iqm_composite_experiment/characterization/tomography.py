@@ -50,6 +50,13 @@ def acquire(
     detuning_hz: float,
     config: Config,
 ) -> tuple[Dataset, list[TomographyCoordinate]]:
+    """Acquire the 12 circuits needed for single-qubit process tomography.
+
+    For each of the four input states ``|0>``, ``|1>``, ``|+x>``, and ``|+y>``,
+    the circuit applies the composite gate and measures its output along x, y,
+    and z.  ``metadata`` records those coordinates in exactly the same order as
+    the circuit results in the returned dataset.
+    """
     builder = compiler.get_schedule_builder()
     circuits: list[TimeBox] = []
     metadata: list[TomographyCoordinate] = []
@@ -69,6 +76,13 @@ def acquire(
 
 
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    """Run process tomography over every configured sequence and sweep point.
+
+    Raw acquisitions are persisted before each qubit's corrected probabilities
+    are converted into an affine Bloch map and Pauli-transfer matrix (PTM).  The
+    returned table contains the PTM, translation, fidelity, effective rotation,
+    and non-unitary-distortion diagnostics for each qubit and setting.
+    """
     rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
@@ -121,6 +135,14 @@ def prep_boxes(
     state: TomographyInput,
     config: Config,
 ) -> list[TimeBox]:
+    """Return calibrated pulses that prepare one tomography input state.
+
+    ``|0>`` needs no pulse, while ``|1>``, ``|+x>``, and ``|+y>`` are prepared
+    with calibrated PRX rotations using the IQM phase convention.
+
+    Raises:
+        ValueError: If ``state`` is not a supported tomography input.
+    """
     if state == "0":
         return []
     if state == "1":
@@ -138,6 +160,14 @@ def analysis_boxes(
     basis: TomographyBasis,
     config: Config,
 ) -> list[TimeBox]:
+    """Return the calibrated basis rotation for a Pauli measurement.
+
+    Readout directly measures z.  For x and y, a calibrated pi/2 PRX rotates
+    the requested Bloch component onto z before computational-basis readout.
+
+    Raises:
+        ValueError: If ``basis`` is not x, y, or z.
+    """
     if basis == "z":
         return []
     if basis == "x":
@@ -156,12 +186,28 @@ def reconstruct_ptm(
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
 ]:
+    """Reconstruct a trace-preserving affine Bloch map by linear inversion.
+
+    Excited-state probabilities are converted to Pauli expectations using
+    ``<sigma> = 1 - 2*P(1)``.  If the channel is ``r_out = M*r_in + t``, the
+    opposite z-pole inputs determine ``t`` and the z column of ``M``; the +x
+    and +y inputs determine its first two columns.
+
+    Args:
+        p1: Corrected probabilities ordered consistently with ``metadata``.
+        metadata: Input-state and measurement-basis coordinate for each value.
+
+    Returns:
+        The 4x4 PTM, its 3x3 Bloch block ``M``, and translation ``t``.
+    """
     outputs: dict[TomographyInput, npt.NDArray[np.float64]] = {
         state: np.zeros(3) for state in TOMO_INPUTS
     }
     axis: dict[TomographyBasis, int] = {"x": 0, "y": 1, "z": 2}
     for probability, (state, basis) in zip(p1, metadata, strict=True):
         outputs[state][axis[basis]] = 1 - 2 * probability
+    # For affine maps, the midpoint of the +z and -z outputs is t, and their
+    # half-difference is M's z column.
     translation = (outputs["0"] + outputs["1"]) / 2
     bloch = np.column_stack([outputs["+x"] - translation, outputs["+y"] - translation, (outputs["0"] - outputs["1"]) / 2])
     ptm = np.zeros((4, 4))
@@ -176,10 +222,20 @@ def metrics(
     bloch: npt.NDArray[np.float64],
     target_angle: float,
 ) -> dict[str, float]:
+    """Summarize fidelity, coherent rotation, and Bloch-map distortion.
+
+    Average gate fidelity compares the reconstructed PTM with the ideal x-axis
+    target.  An SVD-based polar decomposition projects the measured Bloch block
+    onto the nearest proper rotation; its rotation vector supplies the
+    effective angle and axis.  Singular values and the projection residual
+    quantify behavior that cannot be represented by a pure rotation.
+    """
     target = np.zeros((4, 4))
     target[0, 0] = 1
     target[1:, 1:] = Rotation.from_rotvec([target_angle, 0, 0]).as_matrix()
     fidelity = float((np.trace(target.T @ ptm) + 2) / 6)
+    # Correct the orthogonal polar factor when necessary so its determinant is
+    # +1 and scipy can interpret it as a physical three-dimensional rotation.
     u, singular_values, vt = np.linalg.svd(bloch)
     correction = np.eye(3)
     correction[-1, -1] = np.linalg.det(u @ vt)
@@ -187,6 +243,8 @@ def metrics(
     rotvec = Rotation.from_matrix(nearest_rotation).as_rotvec()
     angle = float(np.linalg.norm(rotvec))
     axis = np.array([1.0, 0.0, 0.0]) if angle < 1e-12 else rotvec / angle
+    # At pi the axis-angle representation is sign-degenerate.  Choose +x so a
+    # signed x overrotation remains visible instead of flipping the axis.
     if abs(target_angle - np.pi) < 1e-6 and axis[0] < 0:
         axis = -axis
         angle = 2 * np.pi - angle
