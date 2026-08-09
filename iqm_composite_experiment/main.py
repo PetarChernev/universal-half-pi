@@ -9,9 +9,7 @@ from pathlib import Path
 from iqm.pulla.pulla import Pulla
 
 from common import Config, built_in_sequences, readout_calibration, select_qubits
-import rb
-import ramsey
-import tomography
+from characterization import rb, ramsey, tomography
 
 
 if __name__ == "__main__":
