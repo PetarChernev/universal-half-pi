@@ -47,6 +47,24 @@ class RBPlanItem(TypedDict):
 ResultValue: TypeAlias = str | int | float | bool
 
 
+def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Dataset, list[RBPlanItem]]:
+    builder = compiler.get_schedule_builder()
+    rb_plan, group = plan(sequence, config)
+    circuits: list[TimeBox] = []
+    for item in rb_plan:
+        operations: dict[str, list[TimeBox]] = {}
+        for q in qubits:
+            ops: list[TimeBox] = []
+            for i in item["indices"]:
+                ops += clifford_pulses(builder, q, group[i], config)
+                if item["kind"] == "interleaved":
+                    ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
+            ops += clifford_pulses(builder, q, group[item["recovery"]], config)
+            operations[q] = ops
+        circuits.append(measured_parallel_circuit(builder, qubits, operations, "rb"))
+    return run_batch(pulla, compiler, circuits, qubits, config.rb_shots), rb_plan
+
+
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
     rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
@@ -151,23 +169,6 @@ def plan(
             ]
     return result, group
 
-
-def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Dataset, list[RBPlanItem]]:
-    builder = compiler.get_schedule_builder()
-    rb_plan, group = plan(sequence, config)
-    circuits: list[TimeBox] = []
-    for item in rb_plan:
-        operations: dict[str, list[TimeBox]] = {}
-        for q in qubits:
-            ops: list[TimeBox] = []
-            for i in item["indices"]:
-                ops += clifford_pulses(builder, q, group[i], config)
-                if item["kind"] == "interleaved":
-                    ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
-            ops += clifford_pulses(builder, q, group[item["recovery"]], config)
-            operations[q] = ops
-        circuits.append(measured_parallel_circuit(builder, qubits, operations, "rb"))
-    return run_batch(pulla, compiler, circuits, qubits, config.rb_shots), rb_plan
 
 
 def decay_model(

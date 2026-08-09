@@ -21,6 +21,22 @@ from dataset_persistence import persist_dataset
 ResultValue: TypeAlias = str | int | float | bool
 
 
+def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Dataset:
+    builder = compiler.get_schedule_builder()
+    circuits: list[TimeBox] = []
+    for phase in config.ramsey_phases:
+        operations: dict[str, list[TimeBox]] = {}
+        for q in qubits:
+            ops: list[TimeBox] = []
+            if abs(sequence.target_angle - np.pi) < 1e-6:
+                ops.append(calibrated_prx(builder, q, np.pi / 2, 0, config))
+            ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
+            ops.append(calibrated_prx(builder, q, np.pi / 2, phase, config))
+            operations[q] = ops
+        circuits.append(measured_parallel_circuit(builder, qubits, operations, "ramsey"))
+    return run_batch(pulla, compiler, circuits, qubits, config.ramsey_shots)
+
+
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
     rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
@@ -67,21 +83,6 @@ def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequ
                     rows.append(row)
     return pd.DataFrame(rows)
 
-
-def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Dataset:
-    builder = compiler.get_schedule_builder()
-    circuits: list[TimeBox] = []
-    for phase in config.ramsey_phases:
-        operations: dict[str, list[TimeBox]] = {}
-        for q in qubits:
-            ops: list[TimeBox] = []
-            if abs(sequence.target_angle - np.pi) < 1e-6:
-                ops.append(calibrated_prx(builder, q, np.pi / 2, 0, config))
-            ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
-            ops.append(calibrated_prx(builder, q, np.pi / 2, phase, config))
-            operations[q] = ops
-        circuits.append(measured_parallel_circuit(builder, qubits, operations, "ramsey"))
-    return run_batch(pulla, compiler, circuits, qubits, config.ramsey_shots)
 
 
 def fit_fringe(phases: Sequence[float], p1: Sequence[float]) -> dict[str, float]:

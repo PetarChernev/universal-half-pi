@@ -41,6 +41,32 @@ TOMO_INPUTS: tuple[TomographyInput, ...] = ("0", "1", "+x", "+y")
 TOMO_BASES: tuple[TomographyBasis, ...] = ("x", "y", "z")
 
 
+def acquire(
+    pulla: Pulla,
+    compiler: Compiler,
+    qubits: Sequence[str],
+    sequence: SequenceSpec,
+    amplitude_error: float,
+    detuning_hz: float,
+    config: Config,
+) -> tuple[Dataset, list[TomographyCoordinate]]:
+    builder = compiler.get_schedule_builder()
+    circuits: list[TimeBox] = []
+    metadata: list[TomographyCoordinate] = []
+    for state in TOMO_INPUTS:
+        for basis in TOMO_BASES:
+            operations: dict[str, list[TimeBox]] = {
+                q: (
+                    prep_boxes(builder, q, state, config)
+                    + [composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config)]
+                    + analysis_boxes(builder, q, basis, config)
+                )
+                for q in qubits
+            }
+            circuits.append(measured_parallel_circuit(builder, qubits, operations, "tomo"))
+            metadata.append((state, basis))
+    return run_batch(pulla, compiler, circuits, qubits, config.tomography_shots), metadata
+
 
 def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
     rows: list[dict[str, ResultValue]] = []
@@ -120,32 +146,6 @@ def analysis_boxes(
         return [calibrated_prx(builder, q, np.pi / 2, 0, config)]
     raise ValueError(basis)
 
-
-def acquire(
-    pulla: Pulla,
-    compiler: Compiler,
-    qubits: Sequence[str],
-    sequence: SequenceSpec,
-    amplitude_error: float,
-    detuning_hz: float,
-    config: Config,
-) -> tuple[Dataset, list[TomographyCoordinate]]:
-    builder = compiler.get_schedule_builder()
-    circuits: list[TimeBox] = []
-    metadata: list[TomographyCoordinate] = []
-    for state in TOMO_INPUTS:
-        for basis in TOMO_BASES:
-            operations: dict[str, list[TimeBox]] = {
-                q: (
-                    prep_boxes(builder, q, state, config)
-                    + [composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config)]
-                    + analysis_boxes(builder, q, basis, config)
-                )
-                for q in qubits
-            }
-            circuits.append(measured_parallel_circuit(builder, qubits, operations, "tomo"))
-            metadata.append((state, basis))
-    return run_batch(pulla, compiler, circuits, qubits, config.tomography_shots), metadata
 
 
 def reconstruct_ptm(
