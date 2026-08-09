@@ -25,6 +25,22 @@ TOMO_INPUTS = ("0", "1", "+x", "+y")
 TOMO_BASES = ("x", "y", "z")
 
 
+
+def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for sequence in sequences:
+        for amplitude_error in config.amplitude_errors:
+            for detuning_hz in config.detunings_hz:
+                dataset, metadata = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
+                for q in qubits:
+                    p1 = correct(p1_from_dataset(dataset, q, "tomo"), readout[q])
+                    ptm, bloch, translation = reconstruct_ptm(p1, metadata)
+                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz, "translation_x": translation[0], "translation_y": translation[1], "translation_z": translation[2]}
+                    row.update(metrics(ptm, bloch, sequence.target_angle))
+                    rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def prep_boxes(builder: Any, q: str, state: str, config: Config) -> list[Any]:
     if state == "0":
         return []
@@ -111,18 +127,3 @@ def metrics(ptm: np.ndarray, bloch: np.ndarray, target_angle: float) -> dict[str
         "axis_tilt": float(math.asin(np.clip(axis[2], -1, 1))),
         "axis_distance": float(math.acos(np.clip(axis[0], -1, 1))),
     }
-
-
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    for sequence in sequences:
-        for amplitude_error in config.amplitude_errors:
-            for detuning_hz in config.detunings_hz:
-                dataset, metadata = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                for q in qubits:
-                    p1 = correct(p1_from_dataset(dataset, q, "tomo"), readout[q])
-                    ptm, bloch, translation = reconstruct_ptm(p1, metadata)
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz, "translation_x": translation[0], "translation_y": translation[1], "translation_z": translation[2]}
-                    row.update(metrics(ptm, bloch, sequence.target_angle))
-                    rows.append(row)
-    return pd.DataFrame(rows)

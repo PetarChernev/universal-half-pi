@@ -11,6 +11,19 @@ import pandas as pd
 from common import Config, Pulla, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, p1_from_dataset, prx_matrix, run_batch, wrap
 
 
+def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for sequence in sequences:
+        for amplitude_error in config.amplitude_errors:
+            for detuning_hz in config.detunings_hz:
+                dataset = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
+                for q in qubits:
+                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
+                    row.update(metrics(correct(p1_from_dataset(dataset, q, "ramsey"), readout[q]), sequence, config.ramsey_phases))
+                    rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def acquire(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Any:
     builder = compiler.get_schedule_builder()
     circuits = []
@@ -48,16 +61,3 @@ def metrics(p1: np.ndarray, sequence: SequenceSpec, phases: Sequence[float]) -> 
     shift = wrap(measured["phase"] - ideal["phase"])
     divisor = 2 if abs(sequence.target_angle - np.pi) < 1e-6 else 1
     return {"ramsey_contrast": measured["contrast"], "ramsey_fringe_phase": measured["phase"], "ramsey_fringe_shift": shift, "transition_phase_error": shift / divisor}
-
-
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    for sequence in sequences:
-        for amplitude_error in config.amplitude_errors:
-            for detuning_hz in config.detunings_hz:
-                dataset = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                for q in qubits:
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
-                    row.update(metrics(correct(p1_from_dataset(dataset, q, "ramsey"), readout[q]), sequence, config.ramsey_phases))
-                    rows.append(row)
-    return pd.DataFrame(rows)

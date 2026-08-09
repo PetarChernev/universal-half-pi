@@ -25,6 +25,19 @@ from common import (
 )
 
 
+def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for sequence in sequences:
+        for amplitude_error in config.amplitude_errors:
+            for detuning_hz in config.detunings_hz:
+                dataset, rb_plan = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
+                for q in qubits:
+                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
+                    row.update(metrics(correct(p1_from_dataset(dataset, q, "rb"), readout[q]), rb_plan))
+                    rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def clifford_group() -> tuple[Clifford, ...]:
     generators = (
         (prx_matrix(np.pi / 2, 0), (np.pi / 2, 0)),
@@ -119,16 +132,3 @@ def metrics(p1: np.ndarray, rb_plan: Sequence[dict[str, Any]]) -> dict[str, floa
     p_interleaved = fit_decay(lengths, interleaved)
     p_gate = p_interleaved / p_reference
     return {"rb_reference_decay": p_reference, "rb_interleaved_decay": p_interleaved, "rb_gate_decay": p_gate, "rb_infidelity": 0.5 * (1 - p_gate)}
-
-
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    for sequence in sequences:
-        for amplitude_error in config.amplitude_errors:
-            for detuning_hz in config.detunings_hz:
-                dataset, rb_plan = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                for q in qubits:
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
-                    row.update(metrics(correct(p1_from_dataset(dataset, q, "rb"), readout[q]), rb_plan))
-                    rows.append(row)
-    return pd.DataFrame(rows)
