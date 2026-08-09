@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -23,14 +24,18 @@ from common import (
     run_batch,
     same_unitary,
 )
+from dataset_persistence import persist_dataset
 
 
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
+def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any], output_directory: Path) -> pd.DataFrame:
     rows = []
+    acquisition_index = 0
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
                 dataset, rb_plan = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
+                persist_dataset(dataset, output_directory / f"raw_rb_{acquisition_index:04d}.nc")
+                acquisition_index += 1
                 for q in qubits:
                     row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
                     row.update(metrics(correct(p1_from_dataset(dataset, q, "rb"), readout[q]), rb_plan))

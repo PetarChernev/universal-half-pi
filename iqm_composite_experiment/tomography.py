@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -20,18 +21,22 @@ from common import (
     p1_from_dataset,
     run_batch,
 )
+from dataset_persistence import persist_dataset
 
 TOMO_INPUTS = ("0", "1", "+x", "+y")
 TOMO_BASES = ("x", "y", "z")
 
 
 
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any]) -> pd.DataFrame:
+def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any], output_directory: Path) -> pd.DataFrame:
     rows = []
+    acquisition_index = 0
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
                 dataset, metadata = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
+                persist_dataset(dataset, output_directory / f"raw_tomography_{acquisition_index:04d}.nc")
+                acquisition_index += 1
                 for q in qubits:
                     p1 = correct(p1_from_dataset(dataset, q, "tomo"), readout[q])
                     ptm, bloch, translation = reconstruct_ptm(p1, metadata)
