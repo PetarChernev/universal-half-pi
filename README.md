@@ -4,7 +4,8 @@ Composite pulse characterization experiments for IQM hardware.
 
 ## Setup with pip
 
-Python 3.10 or newer is required.
+Python 3.11 through 3.14 is required by `iqm-pulla`. Python 3.12 is the
+recommended version.
 
 ```bash
 python -m venv .venv
@@ -16,13 +17,20 @@ python -m pip install -e .
 ## Setup with conda or mamba
 
 ```bash
-mamba create -n qti python=3.12 pip
-mamba activate qti
+conda create -n iqm python=3.12 pip
+conda activate iqm
 python -m pip install -e .
 ```
 
-Replace `mamba` with `conda` if preferred. If the `qti` environment already
-exists, activate it and run only the final install command.
+Replace `conda` with `mamba` if preferred. If the `iqm` environment already
+exists, verify that `python --version` reports a supported version before
+running the final install command. An older environment can be updated with:
+
+```bash
+conda install -n iqm python=3.12 pip
+conda activate iqm
+python -m pip install -e .
+```
 
 ## Run
 

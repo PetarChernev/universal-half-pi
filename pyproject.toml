@@ -7,7 +7,7 @@ name = "iqm-composite-experiment"
 version = "0.1.0"
 description = "Composite pulse characterization experiments for IQM hardware"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "iqm-pulla>=14,<15",
     "iqm-pulse>=14,<15",
