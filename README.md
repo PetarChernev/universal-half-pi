@@ -35,8 +35,13 @@ python -m pip install -e .
 ## Run
 
 The configured experiment targets the `garnet` quantum computer and writes its
-datasets and CSV summaries under `results/`.
+datasets, acquisition metadata, and CSV summaries under `results/`.
 
 ```bash
 python iqm_composite_experiment/main.py
 ```
+
+The analytic X5 and X9 phases are represented from their exact formulas. Longer
+numerical phase vectors use the six-decimal values published in Tables I and II
+of `references/Universal_Gates.pdf`; reproducing the paper's machine-precision
+cancellation residuals requires the authors' full-precision vectors.

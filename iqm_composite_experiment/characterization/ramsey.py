@@ -9,7 +9,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from common import Config, Pulla, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, p1_from_dataset, prx_matrix, run_batch, wrap
+from common import Config, Pulla, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, readout_calibration_metadata, run_batch, wrap
 from dataset_persistence import persist_dataset
 
 
@@ -20,11 +20,42 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
                 dataset = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                persist_dataset(dataset, output_directory / f"raw_ramsey_{acquisition_index:04d}.nc")
+                persist_dataset(
+                    dataset,
+                    output_directory / f"raw_ramsey_{acquisition_index:04d}.nc",
+                    {
+                        "technique": "transition_phase_ramsey",
+                        "acquisition_index": acquisition_index,
+                        "sequence": sequence.name,
+                        "target_angle_rad": float(sequence.target_angle),
+                        "constituent_angle_rad": float(sequence.constituent_angle),
+                        "paper_phases_rad": [float(phase) for phase in sequence.phases],
+                        "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
+                        "analysis_phases_rad": [float(phase) for phase in config.ramsey_phases],
+                        "amplitude_error": amplitude_error,
+                        "detuning_hz": detuning_hz,
+                        "qubits": list(qubits),
+                        "shots": config.ramsey_shots,
+                        "readout_calibration_shots": config.tomography_shots,
+                        "prx_implementation": config.prx_implementation,
+                        "fit_model": "offset + cosine*cos(phase) + sine*sin(phase)",
+                        "readout_calibration": readout_calibration_metadata(readout),
+                    },
+                )
                 acquisition_index += 1
                 for q in qubits:
                     row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
-                    row.update(metrics(correct(p1_from_dataset(dataset, q, "ramsey"), readout[q]), sequence, config.ramsey_phases))
+                    calibration = readout[q]
+                    readout_scale = 1.0 if calibration is None else 1.0 / abs(
+                        1 - calibration.p1_given_0 - calibration.p0_given_1
+                    )
+                    row.update(metrics(
+                        correct(p1_from_dataset(dataset, q, "ramsey"), calibration),
+                        sequence,
+                        config.ramsey_phases,
+                        config.ramsey_shots,
+                        readout_scale,
+                    ))
                     rows.append(row)
     return pd.DataFrame(rows)
 
@@ -48,8 +79,21 @@ def acquire(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequence: Sequen
 def fit_fringe(phases: Sequence[float], p1: Sequence[float]) -> dict[str, float]:
     phases = np.asarray(phases)
     design = np.column_stack([np.ones(len(phases)), np.cos(phases), np.sin(phases)])
+    if np.linalg.matrix_rank(design) < 3:
+        raise ValueError("Ramsey phases do not identify offset, cosine, and sine terms.")
     offset, cosine, sine = np.linalg.lstsq(design, np.asarray(p1), rcond=None)[0]
-    return {"offset": float(offset), "contrast": float(math.hypot(cosine, sine)), "phase": float(math.atan2(sine, cosine))}
+    fitted = design @ np.array([offset, cosine, sine])
+    amplitude = float(math.hypot(cosine, sine))
+    visibility = amplitude / float(offset) if offset > 0 else float("nan")
+    return {
+        "offset": float(offset),
+        "cosine_coefficient": float(cosine),
+        "sine_coefficient": float(sine),
+        "fringe_amplitude": amplitude,
+        "fringe_visibility": visibility,
+        "phase": float(math.atan2(sine, cosine)),
+        "fit_rmse": float(np.sqrt(np.mean((np.asarray(p1) - fitted) ** 2))),
+    }
 
 
 def ideal_p1(sequence: SequenceSpec, phases: Sequence[float]) -> np.ndarray:
@@ -60,9 +104,45 @@ def ideal_p1(sequence: SequenceSpec, phases: Sequence[float]) -> np.ndarray:
     return np.array([abs((prx_matrix(np.pi / 2, phase) @ state)[1]) ** 2 for phase in phases])
 
 
-def metrics(p1: np.ndarray, sequence: SequenceSpec, phases: Sequence[float]) -> dict[str, float]:
+def metrics(
+    p1: np.ndarray,
+    sequence: SequenceSpec,
+    phases: Sequence[float],
+    shots: int,
+    readout_scale: float = 1.0,
+) -> dict[str, float | bool]:
     measured = fit_fringe(phases, p1)
     ideal = fit_fringe(phases, ideal_p1(sequence, phases))
     shift = wrap(measured["phase"] - ideal["phase"])
     divisor = 2 if abs(sequence.target_angle - np.pi) < 1e-6 else 1
-    return {"ramsey_contrast": measured["contrast"], "ramsey_fringe_phase": measured["phase"], "ramsey_fringe_shift": shift, "transition_phase_error": shift / divisor}
+    design = np.column_stack([np.ones(len(phases)), np.cos(phases), np.sin(phases)])
+    covariance_bound = (
+        (0.25 * readout_scale**2 / shots)
+        * np.linalg.inv(design.T @ design)
+    )
+    coefficient_noise = float(np.sqrt(np.linalg.eigvalsh(covariance_bound[1:, 1:]).max()))
+    phase_identifiable = measured["fringe_amplitude"] > 3 * coefficient_noise
+    if measured["fringe_amplitude"] > 0:
+        gradient = np.array([
+            -measured["sine_coefficient"],
+            measured["cosine_coefficient"],
+        ]) / measured["fringe_amplitude"] ** 2
+        phase_standard_error_bound = float(
+            np.sqrt(gradient @ covariance_bound[1:, 1:] @ gradient)
+        )
+    else:
+        phase_standard_error_bound = float("inf")
+    return {
+        "ramsey_offset": measured["offset"],
+        "ramsey_cosine_coefficient": measured["cosine_coefficient"],
+        "ramsey_sine_coefficient": measured["sine_coefficient"],
+        "ramsey_fringe_amplitude": measured["fringe_amplitude"],
+        "ramsey_fringe_visibility": measured["fringe_visibility"],
+        "ramsey_fringe_phase": measured["phase"],
+        "ramsey_fit_rmse": measured["fit_rmse"],
+        "ramsey_fringe_shift": shift,
+        "ramsey_phase_shot_noise_bound": phase_standard_error_bound,
+        "ramsey_phase_identifiable": phase_identifiable,
+        # The IQM analysis-pulse convention has the opposite phase sign to the paper.
+        "transition_phase_error": -shift / divisor if phase_identifiable else float("nan"),
+    }

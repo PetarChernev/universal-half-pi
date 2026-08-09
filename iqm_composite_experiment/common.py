@@ -44,6 +44,19 @@ class ReadoutCalibration:
         return np.clip((p1 - self.p1_given_0) / denominator, 0, 1)
 
 
+def readout_calibration_metadata(
+    calibrations: dict[str, ReadoutCalibration | None],
+) -> dict[str, dict[str, float] | None]:
+    """Return JSON-compatible readout-calibration parameters."""
+    return {
+        qubit: None if calibration is None else {
+            "p1_given_0": calibration.p1_given_0,
+            "p0_given_1": calibration.p0_given_1,
+        }
+        for qubit, calibration in calibrations.items()
+    }
+
+
 @dataclass(frozen=True)
 class Clifford:
     unitary: np.ndarray
@@ -51,11 +64,17 @@ class Clifford:
 
 
 def prx_matrix(angle: float, phase: float) -> np.ndarray:
+    """Return the IQM PRX unitary for an angle and hardware phase."""
     c, s = math.cos(angle / 2), math.sin(angle / 2)
     return np.array(
-        [[c, -1j*s*np.exp(1j*phase)], [-1j*s*np.exp(-1j*phase), c]],
+        [[c, -1j*s*np.exp(-1j*phase)], [-1j*s*np.exp(1j*phase), c]],
         dtype=complex,
     )
+
+
+def paper_phase_to_iqm(phase: float) -> float:
+    """Convert the paper's Cayley-Klein phase convention to IQM PRX."""
+    return -float(phase)
 
 
 def wrap(angle: float) -> float:
@@ -289,7 +308,7 @@ def composite_gate(
             builder=builder,
             qubit=qubit,
             angle=sequence.constituent_angle,
-            phase=phase,
+            phase=paper_phase_to_iqm(phase),
             amplitude_error=amplitude_error,
             detuning_hz=detuning_hz,
             config=config,

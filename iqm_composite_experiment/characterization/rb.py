@@ -19,8 +19,10 @@ from common import (
     composite_gate,
     correct,
     measured_parallel_circuit,
+    paper_phase_to_iqm,
     p1_from_dataset,
     prx_matrix,
+    readout_calibration_metadata,
     run_batch,
     same_unitary,
 )
@@ -34,7 +36,29 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
                 dataset, rb_plan = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                persist_dataset(dataset, output_directory / f"raw_rb_{acquisition_index:04d}.nc")
+                persist_dataset(
+                    dataset,
+                    output_directory / f"raw_rb_{acquisition_index:04d}.nc",
+                    {
+                        "technique": "interleaved_randomized_benchmarking",
+                        "acquisition_index": acquisition_index,
+                        "sequence": sequence.name,
+                        "target_angle_rad": float(sequence.target_angle),
+                        "constituent_angle_rad": float(sequence.constituent_angle),
+                        "paper_phases_rad": [float(phase) for phase in sequence.phases],
+                        "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
+                        "amplitude_error": amplitude_error,
+                        "detuning_hz": detuning_hz,
+                        "qubits": list(qubits),
+                        "shots": config.rb_shots,
+                        "readout_calibration_shots": config.tomography_shots,
+                        "seed": config.seed,
+                        "prx_implementation": config.prx_implementation,
+                        "fit_model": "amplitude * decay**length + offset",
+                        "readout_calibration": readout_calibration_metadata(readout),
+                        "rb_plan": rb_plan,
+                    },
+                )
                 acquisition_index += 1
                 for q in qubits:
                     row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
@@ -121,19 +145,55 @@ def decay_model(length: np.ndarray, a: float, p: float, b: float) -> np.ndarray:
     return a * p ** length + b
 
 
-def fit_decay(lengths: Sequence[int], survival: Sequence[float]) -> float:
-    parameters, _ = curve_fit(decay_model, np.asarray(lengths, dtype=float), np.asarray(survival, dtype=float), p0=(0.45, 0.99, 0.5), bounds=((0, 0, 0), (1, 1, 1)), maxfev=20_000)
-    return float(parameters[1])
+def fit_decay(lengths: Sequence[int], survival: Sequence[float]) -> dict[str, float]:
+    x = np.asarray(lengths, dtype=float)
+    y = np.asarray(survival, dtype=float)
+    parameters, covariance = curve_fit(
+        decay_model,
+        x,
+        y,
+        p0=(0.45, 0.99, 0.5),
+        bounds=((0, 0, 0), (1, 1, 1)),
+        maxfev=20_000,
+    )
+    standard_errors = np.sqrt(np.clip(np.diag(covariance), 0, None))
+    return {
+        "amplitude": float(parameters[0]),
+        "decay": float(parameters[1]),
+        "offset": float(parameters[2]),
+        "amplitude_standard_error": float(standard_errors[0]),
+        "decay_standard_error": float(standard_errors[1]),
+        "offset_standard_error": float(standard_errors[2]),
+        "fit_rmse": float(np.sqrt(np.mean((y - decay_model(x, *parameters)) ** 2))),
+    }
 
 
-def metrics(p1: np.ndarray, rb_plan: Sequence[dict[str, Any]]) -> dict[str, float]:
+def metrics(p1: np.ndarray, rb_plan: Sequence[dict[str, Any]]) -> dict[str, float | bool]:
     grouped: dict[tuple[str, int], list[float]] = {}
     for probability, item in zip(p1, rb_plan, strict=True):
         grouped.setdefault((item["kind"], item["length"]), []).append(1 - probability)
     lengths = sorted({item["length"] for item in rb_plan})
     reference = [np.mean(grouped[("reference", length)]) for length in lengths]
     interleaved = [np.mean(grouped[("interleaved", length)]) for length in lengths]
-    p_reference = fit_decay(lengths, reference)
-    p_interleaved = fit_decay(lengths, interleaved)
-    p_gate = p_interleaved / p_reference
-    return {"rb_reference_decay": p_reference, "rb_interleaved_decay": p_interleaved, "rb_gate_decay": p_gate, "rb_infidelity": 0.5 * (1 - p_gate)}
+    reference_fit = fit_decay(lengths, reference)
+    interleaved_fit = fit_decay(lengths, interleaved)
+    p_reference = reference_fit["decay"]
+    p_interleaved = interleaved_fit["decay"]
+    if p_reference <= 0:
+        p_gate = float("nan")
+        p_gate_standard_error = float("nan")
+    else:
+        p_gate = p_interleaved / p_reference
+        p_gate_standard_error = float(np.hypot(
+            interleaved_fit["decay_standard_error"] / p_reference,
+            p_interleaved * reference_fit["decay_standard_error"] / p_reference**2,
+        ))
+    result: dict[str, float | bool] = {
+        "rb_gate_decay": p_gate,
+        "rb_gate_decay_standard_error": p_gate_standard_error,
+        "rb_infidelity": 0.5 * (1 - p_gate),
+        "rb_estimate_physical": bool(0 <= p_gate <= 1),
+    }
+    result.update({f"rb_reference_{key}": value for key, value in reference_fit.items()})
+    result.update({f"rb_interleaved_{key}": value for key, value in interleaved_fit.items()})
+    return result

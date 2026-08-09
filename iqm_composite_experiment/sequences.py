@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class SequenceSpec:
-    """A phase-programmed composite rotation."""
+    """A composite rotation whose phases use the paper's convention."""
 
     name: str
     target_angle: float
