@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Sequence
+from typing import TypeAlias
 
 import numpy as np
+import numpy.typing as npt
+from iqm.cpc.compiler.compiler import Compiler
+from iqm.cpc.core.run_result import RunResult
 from iqm.pulla.pulla import Pulla
-from iqm.pulse.playlist.instructions import IQPulse
-from iqm.pulse.playlist.schedule import Segment
+from iqm.pulse.builder import ScheduleBuilder
+from iqm.pulse.gates.prx import PrxGateImplementation
+from iqm.pulse.playlist.instructions import IQPulse, Instruction
+from iqm.pulse.playlist.schedule import Schedule, Segment
 from iqm.pulse.timebox import TimeBox
+from iqm.station_control.interface.models import RunDefinition
+from xarray import Dataset
 
 from sequences import SequenceSpec, built_in_sequences
+
+
+TimeBoxLike: TypeAlias = TimeBox | Iterable[TimeBox]
 
 
 @dataclass(frozen=True)
@@ -37,15 +48,21 @@ class ReadoutCalibration:
     p1_given_0: float
     p0_given_1: float
 
-    def correct(self, p1: np.ndarray) -> np.ndarray:
+    def correct(
+        self,
+        p1: npt.NDArray[np.float64],
+    ) -> npt.NDArray[np.float64]:
         denominator = 1 - self.p1_given_0 - self.p0_given_1
         if abs(denominator) < 1e-9:
             raise ValueError("Singular readout-confusion matrix.")
         return np.clip((p1 - self.p1_given_0) / denominator, 0, 1)
 
 
+ReadoutMap: TypeAlias = Mapping[str, ReadoutCalibration | None]
+
+
 def readout_calibration_metadata(
-    calibrations: dict[str, ReadoutCalibration | None],
+    calibrations: ReadoutMap,
 ) -> dict[str, dict[str, float] | None]:
     """Return JSON-compatible readout-calibration parameters."""
     return {
@@ -59,11 +76,11 @@ def readout_calibration_metadata(
 
 @dataclass(frozen=True)
 class Clifford:
-    unitary: np.ndarray
+    unitary: npt.NDArray[np.complex128]
     pulses: tuple[tuple[float, float], ...]
 
 
-def prx_matrix(angle: float, phase: float) -> np.ndarray:
+def prx_matrix(angle: float, phase: float) -> npt.NDArray[np.complex128]:
     """Return the IQM PRX unitary for an angle and hardware phase."""
     c, s = math.cos(angle / 2), math.sin(angle / 2)
     return np.array(
@@ -81,7 +98,11 @@ def wrap(angle: float) -> float:
     return float((angle + np.pi) % (2*np.pi) - np.pi)
 
 
-def same_unitary(left: np.ndarray, right: np.ndarray, atol: float = 1e-8) -> bool:
+def same_unitary(
+    left: npt.NDArray[np.complex128],
+    right: npt.NDArray[np.complex128],
+    atol: float = 1e-8,
+) -> bool:
     return abs(abs(np.trace(left.conj().T @ right)) / 2 - 1) < atol
 
 
@@ -115,22 +136,31 @@ def select_qubits(pulla: Pulla, requested: Sequence[str] | None) -> tuple[str, .
 
 def run_batch(
     pulla: Pulla,
-    compiler: Any,
+    compiler: Compiler,
     circuits: Sequence[TimeBox],
     qubits: Sequence[str],
     shots: int,
-) -> Any:
+) -> Dataset:
     settings = compiler.get_settings(timeboxes=list(circuits))
     settings.set_shots(shots)
     run_definition, context = compiler.compile(
         timeboxes=list(circuits), components=list(qubits), settings=settings,
     )
+    if not isinstance(run_definition, RunDefinition):
+        raise TypeError("Compiler did not produce an IQM RunDefinition.")
     job = pulla.submit_playlist(run_definition, context=context)
     job.wait_for_completion()
-    return job.result(compiler=compiler).dataset
+    result = job.result(compiler=compiler)
+    if not isinstance(result, RunResult):
+        raise RuntimeError("IQM job completed without an EXA-style RunResult.")
+    return result.dataset
 
 
-def p1_from_dataset(dataset: Any, qubit: str, key: str) -> np.ndarray:
+def p1_from_dataset(
+    dataset: Dataset,
+    qubit: str,
+    key: str,
+) -> npt.NDArray[np.float64]:
     exact = f"{qubit}__{key}_excited_state_probability"
     if exact in dataset:
         return np.asarray(dataset[exact].data, dtype=float).reshape(-1)
@@ -148,7 +178,11 @@ def p1_from_dataset(dataset: Any, qubit: str, key: str) -> np.ndarray:
     return np.asarray(dataset[matches[0]].data, dtype=float).reshape(-1)
 
 
-def prx_impl(builder: Any, qubit: str, config: Config) -> Any:
+def prx_impl(
+    builder: ScheduleBuilder,
+    qubit: str,
+    config: Config,
+) -> PrxGateImplementation:
     if config.prx_implementation is None:
         return builder.prx([qubit])
     return builder.get_implementation(
@@ -156,13 +190,16 @@ def prx_impl(builder: Any, qubit: str, config: Config) -> Any:
     )
 
 def _single_iq_pulse(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     box: TimeBox,
-) -> tuple[str, Any, list[Any], int]:
+) -> tuple[str, Schedule, list[Instruction], int]:
     """Extract the single IQPulse from a calibrated PRX TimeBox."""
     drive = builder.get_drive_channel(qubit)
-    schedule = deepcopy(box.atom)
+    atom = box.atom
+    if atom is None:
+        raise ValueError("PRX implementation did not produce an atomic schedule.")
+    schedule = deepcopy(atom)
     instructions = list(schedule[drive])
 
     indices = [
@@ -181,7 +218,7 @@ def _single_iq_pulse(
 
 
 def add_amplitude_error(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     box: TimeBox,
     amplitude_error: float,
@@ -199,6 +236,8 @@ def add_amplitude_error(
     )
 
     pulse = instructions[i]
+    if not isinstance(pulse, IQPulse):
+        raise RuntimeError("Selected PRX instruction is not an IQPulse.")
 
     instructions[i] = replace(
         pulse,
@@ -216,7 +255,7 @@ def add_amplitude_error(
 
 
 def add_detuning(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     box: TimeBox,
     detuning_hz: float,
@@ -229,6 +268,8 @@ def add_detuning(
     )
 
     pulse = instructions[i]
+    if not isinstance(pulse, IQPulse):
+        raise RuntimeError("Selected PRX instruction is not an IQPulse.")
 
     offset = detuning_hz / float(builder.channels[drive].sample_rate)
 
@@ -247,7 +288,7 @@ def add_detuning(
 
 
 def calibrated_prx(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     angle: float,
     phase: float,
@@ -260,7 +301,7 @@ def calibrated_prx(
 
 
 def erroneous_prx(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     angle: float,
     phase: float,
@@ -296,7 +337,7 @@ def erroneous_prx(
 
 
 def composite_gate(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubit: str,
     sequence: SequenceSpec,
     amplitude_error: float,
@@ -316,7 +357,7 @@ def composite_gate(
         for phase in sequence.phases
     )
 
-def as_timebox(box_or_boxes: Any) -> TimeBox:
+def as_timebox(box_or_boxes: TimeBoxLike) -> TimeBox:
     if isinstance(box_or_boxes, TimeBox):
         return box_or_boxes
     boxes = list(box_or_boxes)
@@ -331,7 +372,7 @@ def as_timebox(box_or_boxes: Any) -> TimeBox:
 
 
 def measured_parallel_circuit(
-    builder: Any,
+    builder: ScheduleBuilder,
     qubits: Sequence[str],
     operations: dict[str, list[TimeBox]],
     key: str,
@@ -345,15 +386,15 @@ def measured_parallel_circuit(
 
 def readout_calibration(
     pulla: Pulla,
-    compiler: Any,
+    compiler: Compiler,
     qubits: Sequence[str],
     config: Config,
 ) -> dict[str, ReadoutCalibration | None]:
     if not config.readout_correction:
         return {q: None for q in qubits}
     builder = compiler.get_schedule_builder()
-    ground = {q: [] for q in qubits}
-    excited = {
+    ground: dict[str, list[TimeBox]] = {q: [] for q in qubits}
+    excited: dict[str, list[TimeBox]] = {
         q: [calibrated_prx(builder, q, np.pi, 0, config)] for q in qubits
     }
     dataset = run_batch(
@@ -374,6 +415,7 @@ def readout_calibration(
 
 
 def correct(
-    p1: np.ndarray, calibration: ReadoutCalibration | None,
-) -> np.ndarray:
+    p1: npt.NDArray[np.float64],
+    calibration: ReadoutCalibration | None,
+) -> npt.NDArray[np.float64]:
     return p1 if calibration is None else calibration.correct(p1)

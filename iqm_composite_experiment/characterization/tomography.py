@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Literal, TypeAlias
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
+from iqm.cpc.compiler.compiler import Compiler
+from iqm.pulse.builder import ScheduleBuilder
+from iqm.pulse.timebox import TimeBox
 from scipy.spatial.transform import Rotation
+from xarray import Dataset
 
 from common import (
     Config,
     Pulla,
+    ReadoutMap,
     SequenceSpec,
     calibrated_prx,
     composite_gate,
@@ -25,13 +32,18 @@ from common import (
 )
 from dataset_persistence import persist_dataset
 
-TOMO_INPUTS = ("0", "1", "+x", "+y")
-TOMO_BASES = ("x", "y", "z")
+TomographyInput: TypeAlias = Literal["0", "1", "+x", "+y"]
+TomographyBasis: TypeAlias = Literal["x", "y", "z"]
+TomographyCoordinate: TypeAlias = tuple[TomographyInput, TomographyBasis]
+ResultValue: TypeAlias = str | int | float | bool
+
+TOMO_INPUTS: tuple[TomographyInput, ...] = ("0", "1", "+x", "+y")
+TOMO_BASES: tuple[TomographyBasis, ...] = ("x", "y", "z")
 
 
 
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any], output_directory: Path) -> pd.DataFrame:
-    rows = []
+def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
@@ -66,7 +78,7 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
                 for q in qubits:
                     p1 = correct(p1_from_dataset(dataset, q, "tomo"), readout[q])
                     ptm, bloch, translation = reconstruct_ptm(p1, metadata)
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz, "translation_x": translation[0], "translation_y": translation[1], "translation_z": translation[2]}
+                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz, "translation_x": float(translation[0]), "translation_y": float(translation[1]), "translation_z": float(translation[2])}
                     row.update({
                         f"ptm_{i}{j}": float(ptm[i, j])
                         for i in range(4)
@@ -77,7 +89,12 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
     return pd.DataFrame(rows)
 
 
-def prep_boxes(builder: Any, q: str, state: str, config: Config) -> list[Any]:
+def prep_boxes(
+    builder: ScheduleBuilder,
+    q: str,
+    state: TomographyInput,
+    config: Config,
+) -> list[TimeBox]:
     if state == "0":
         return []
     if state == "1":
@@ -89,7 +106,12 @@ def prep_boxes(builder: Any, q: str, state: str, config: Config) -> list[Any]:
     raise ValueError(state)
 
 
-def analysis_boxes(builder: Any, q: str, basis: str, config: Config) -> list[Any]:
+def analysis_boxes(
+    builder: ScheduleBuilder,
+    q: str,
+    basis: TomographyBasis,
+    config: Config,
+) -> list[TimeBox]:
     if basis == "z":
         return []
     if basis == "x":
@@ -101,18 +123,19 @@ def analysis_boxes(builder: Any, q: str, basis: str, config: Config) -> list[Any
 
 def acquire(
     pulla: Pulla,
-    compiler: Any,
+    compiler: Compiler,
     qubits: Sequence[str],
     sequence: SequenceSpec,
     amplitude_error: float,
     detuning_hz: float,
     config: Config,
-) -> tuple[Any, list[tuple[str, str]]]:
+) -> tuple[Dataset, list[TomographyCoordinate]]:
     builder = compiler.get_schedule_builder()
-    circuits, metadata = [], []
+    circuits: list[TimeBox] = []
+    metadata: list[TomographyCoordinate] = []
     for state in TOMO_INPUTS:
         for basis in TOMO_BASES:
-            operations = {
+            operations: dict[str, list[TimeBox]] = {
                 q: (
                     prep_boxes(builder, q, state, config)
                     + [composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config)]
@@ -125,9 +148,18 @@ def acquire(
     return run_batch(pulla, compiler, circuits, qubits, config.tomography_shots), metadata
 
 
-def reconstruct_ptm(p1: np.ndarray, metadata: Sequence[tuple[str, str]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    outputs = {state: np.zeros(3) for state in TOMO_INPUTS}
-    axis = {"x": 0, "y": 1, "z": 2}
+def reconstruct_ptm(
+    p1: npt.NDArray[np.float64],
+    metadata: Sequence[TomographyCoordinate],
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    outputs: dict[TomographyInput, npt.NDArray[np.float64]] = {
+        state: np.zeros(3) for state in TOMO_INPUTS
+    }
+    axis: dict[TomographyBasis, int] = {"x": 0, "y": 1, "z": 2}
     for probability, (state, basis) in zip(p1, metadata, strict=True):
         outputs[state][axis[basis]] = 1 - 2 * probability
     translation = (outputs["0"] + outputs["1"]) / 2
@@ -139,7 +171,11 @@ def reconstruct_ptm(p1: np.ndarray, metadata: Sequence[tuple[str, str]]) -> tupl
     return ptm, bloch, translation
 
 
-def metrics(ptm: np.ndarray, bloch: np.ndarray, target_angle: float) -> dict[str, float]:
+def metrics(
+    ptm: npt.NDArray[np.float64],
+    bloch: npt.NDArray[np.float64],
+    target_angle: float,
+) -> dict[str, float]:
     target = np.zeros((4, 4))
     target[0, 0] = 1
     target[1:, 1:] = Rotation.from_rotvec([target_angle, 0, 0]).as_matrix()

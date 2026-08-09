@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TypeAlias
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
+from iqm.cpc.compiler.compiler import Compiler
+from iqm.pulse.timebox import TimeBox
+from xarray import Dataset
 
-from common import Config, Pulla, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, readout_calibration_metadata, run_batch, wrap
+from common import Config, Pulla, ReadoutMap, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, readout_calibration_metadata, run_batch, wrap
 from dataset_persistence import persist_dataset
 
 
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any], output_directory: Path) -> pd.DataFrame:
-    rows = []
+ResultValue: TypeAlias = str | int | float | bool
+
+
+def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
@@ -44,7 +52,7 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
                 )
                 acquisition_index += 1
                 for q in qubits:
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
+                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
                     calibration = readout[q]
                     readout_scale = 1.0 if calibration is None else 1.0 / abs(
                         1 - calibration.p1_given_0 - calibration.p0_given_1
@@ -60,13 +68,13 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
     return pd.DataFrame(rows)
 
 
-def acquire(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Any:
+def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Dataset:
     builder = compiler.get_schedule_builder()
-    circuits = []
+    circuits: list[TimeBox] = []
     for phase in config.ramsey_phases:
-        operations = {}
+        operations: dict[str, list[TimeBox]] = {}
         for q in qubits:
-            ops = []
+            ops: list[TimeBox] = []
             if abs(sequence.target_angle - np.pi) < 1e-6:
                 ops.append(calibrated_prx(builder, q, np.pi / 2, 0, config))
             ops.append(composite_gate(builder, q, sequence, amplitude_error, detuning_hz, config))
@@ -96,7 +104,10 @@ def fit_fringe(phases: Sequence[float], p1: Sequence[float]) -> dict[str, float]
     }
 
 
-def ideal_p1(sequence: SequenceSpec, phases: Sequence[float]) -> np.ndarray:
+def ideal_p1(
+    sequence: SequenceSpec,
+    phases: Sequence[float],
+) -> npt.NDArray[np.float64]:
     state = np.array([1.0, 0.0], dtype=complex)
     if abs(sequence.target_angle - np.pi) < 1e-6:
         state = prx_matrix(np.pi / 2, 0) @ state
@@ -105,7 +116,7 @@ def ideal_p1(sequence: SequenceSpec, phases: Sequence[float]) -> np.ndarray:
 
 
 def metrics(
-    p1: np.ndarray,
+    p1: npt.NDArray[np.float64],
     sequence: SequenceSpec,
     phases: Sequence[float],
     shots: int,

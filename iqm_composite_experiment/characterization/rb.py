@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Literal, TypeAlias, TypedDict
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
+from iqm.cpc.compiler.compiler import Compiler
+from iqm.pulse.builder import ScheduleBuilder
+from iqm.pulse.timebox import TimeBox
 from scipy.optimize import curve_fit
+from xarray import Dataset
 
 
 from common import (
     Clifford,
     Config,
     Pulla,
+    ReadoutMap,
     SequenceSpec,
     calibrated_prx,
     composite_gate,
@@ -29,8 +36,19 @@ from common import (
 from dataset_persistence import persist_dataset
 
 
-def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: dict[str, Any], output_directory: Path) -> pd.DataFrame:
-    rows = []
+class RBPlanItem(TypedDict):
+    kind: Literal["reference", "interleaved"]
+    length: int
+    sample: int
+    indices: list[int]
+    recovery: int
+
+
+ResultValue: TypeAlias = str | int | float | bool
+
+
+def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
+    rows: list[dict[str, ResultValue]] = []
     acquisition_index = 0
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
@@ -61,7 +79,7 @@ def run(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequences: Sequence[
                 )
                 acquisition_index += 1
                 for q in qubits:
-                    row = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
+                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
                     row.update(metrics(correct(p1_from_dataset(dataset, q, "rb"), readout[q]), rb_plan))
                     rows.append(row)
     return pd.DataFrame(rows)
@@ -87,26 +105,37 @@ def clifford_group() -> tuple[Clifford, ...]:
     return tuple(group)
 
 
-def clifford_index(unitary: np.ndarray, group: Sequence[Clifford]) -> int:
+def clifford_index(
+    unitary: npt.NDArray[np.complex128],
+    group: Sequence[Clifford],
+) -> int:
     for i, element in enumerate(group):
         if same_unitary(unitary, element.unitary, atol=1e-7):
             return i
     raise ValueError("Unitary is not a single-qubit Clifford.")
 
 
-def clifford_pulses(builder: Any, q: str, element: Clifford, config: Config) -> list[Any]:
+def clifford_pulses(
+    builder: ScheduleBuilder,
+    q: str,
+    element: Clifford,
+    config: Config,
+) -> list[TimeBox]:
     return [calibrated_prx(builder, q, angle, phase, config) for angle, phase in element.pulses]
 
 
-def plan(sequence: SequenceSpec, config: Config) -> tuple[list[dict[str, Any]], tuple[Clifford, ...]]:
+def plan(
+    sequence: SequenceSpec,
+    config: Config,
+) -> tuple[list[RBPlanItem], tuple[Clifford, ...]]:
     group = clifford_group()
     target = prx_matrix(sequence.target_angle, 0)
     clifford_index(target, group)
     rng = np.random.default_rng(config.seed)
-    result = []
+    result: list[RBPlanItem] = []
     for length in config.rb_lengths:
         for sample in range(config.rb_samples):
-            indices = rng.integers(0, 24, size=length).tolist()
+            indices = [int(index) for index in rng.integers(0, 24, size=length)]
             total = np.eye(2, dtype=complex)
             for i in indices:
                 total = group[i].unitary @ total
@@ -123,14 +152,14 @@ def plan(sequence: SequenceSpec, config: Config) -> tuple[list[dict[str, Any]], 
     return result, group
 
 
-def acquire(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Any, list[dict[str, Any]]]:
+def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Dataset, list[RBPlanItem]]:
     builder = compiler.get_schedule_builder()
     rb_plan, group = plan(sequence, config)
-    circuits = []
+    circuits: list[TimeBox] = []
     for item in rb_plan:
-        operations = {}
+        operations: dict[str, list[TimeBox]] = {}
         for q in qubits:
-            ops = []
+            ops: list[TimeBox] = []
             for i in item["indices"]:
                 ops += clifford_pulses(builder, q, group[i], config)
                 if item["kind"] == "interleaved":
@@ -141,7 +170,12 @@ def acquire(pulla: Pulla, compiler: Any, qubits: Sequence[str], sequence: Sequen
     return run_batch(pulla, compiler, circuits, qubits, config.rb_shots), rb_plan
 
 
-def decay_model(length: np.ndarray, a: float, p: float, b: float) -> np.ndarray:
+def decay_model(
+    length: npt.NDArray[np.float64],
+    a: float,
+    p: float,
+    b: float,
+) -> npt.NDArray[np.float64]:
     return a * p ** length + b
 
 
@@ -168,13 +202,18 @@ def fit_decay(lengths: Sequence[int], survival: Sequence[float]) -> dict[str, fl
     }
 
 
-def metrics(p1: np.ndarray, rb_plan: Sequence[dict[str, Any]]) -> dict[str, float | bool]:
+def metrics(
+    p1: npt.NDArray[np.float64],
+    rb_plan: Sequence[RBPlanItem],
+) -> dict[str, float | bool]:
     grouped: dict[tuple[str, int], list[float]] = {}
     for probability, item in zip(p1, rb_plan, strict=True):
-        grouped.setdefault((item["kind"], item["length"]), []).append(1 - probability)
+        grouped.setdefault((item["kind"], item["length"]), []).append(
+            float(1 - probability)
+        )
     lengths = sorted({item["length"] for item in rb_plan})
-    reference = [np.mean(grouped[("reference", length)]) for length in lengths]
-    interleaved = [np.mean(grouped[("interleaved", length)]) for length in lengths]
+    reference = [float(np.mean(grouped[("reference", length)])) for length in lengths]
+    interleaved = [float(np.mean(grouped[("interleaved", length)])) for length in lengths]
     reference_fit = fit_decay(lengths, reference)
     interleaved_fit = fit_decay(lengths, interleaved)
     p_reference = reference_fit["decay"]
