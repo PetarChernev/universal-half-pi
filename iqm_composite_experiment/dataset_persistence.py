@@ -28,7 +28,15 @@ def persist_dataset(
 ) -> None:
     """Write an acquisition dataset and a JSON description of its circuits."""
     dataset.to_netcdf(path)
-    path.with_suffix(".json").write_text(
+    persist_metadata(path, metadata)
+
+
+def persist_metadata(
+    dataset_path: Path,
+    metadata: Mapping[str, JsonValue],
+) -> None:
+    """Write the JSON description adjacent to an acquisition dataset."""
+    dataset_path.with_suffix(".json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )

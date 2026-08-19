@@ -4,35 +4,31 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from pathlib import Path
 from typing import TypeAlias
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from iqm.cpc.compiler.compiler import Compiler
+from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.timebox import TimeBox
-from xarray import Dataset
 
-from common import Config, Pulla, ReadoutMap, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, readout_calibration_metadata, run_batch, wrap
-from dataset_persistence import persist_dataset
+from common import Config, ReadoutMap, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, wrap
+from execution import AcquiredBatch, PlannedBatch
 
 
 ResultValue: TypeAlias = str | int | float | bool
 
 
-def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> Dataset:
-    """Acquire a phase-scanned Ramsey fringe for one sequence/error setting.
+def build_batch(builder: ScheduleBuilder, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config, acquisition_index: int) -> PlannedBatch:
+    """Build a phase-scanned Ramsey fringe for one sequence/error setting.
 
     Each circuit applies the composite gate followed by a calibrated pi/2
     analysis pulse whose phase is taken from ``config.ramsey_phases``.  A pi
     target receives an initial calibrated pi/2 pulse so that the gate acts on
     an equatorial state and its transition phase remains observable.
 
-    The returned dataset contains one circuit result per analysis phase, in
-    the same order as ``config.ramsey_phases``.
+    The manifest contains one coordinate per circuit in analysis-phase order.
     """
-    builder = compiler.get_schedule_builder()
     circuits: list[TimeBox] = []
     for phase in config.ramsey_phases:
         operations: dict[str, list[TimeBox]] = {}
@@ -46,62 +42,78 @@ def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: S
             ops.append(calibrated_prx(builder, q, np.pi / 2, phase, config))
             operations[q] = ops
         circuits.append(measured_parallel_circuit(builder, qubits, operations, "ramsey"))
-    return run_batch(pulla, compiler, circuits, qubits, config.ramsey_shots)
+    return PlannedBatch(
+        batch_id=f"ramsey_{acquisition_index:04d}",
+        technique="transition_phase_ramsey",
+        acquisition_index=acquisition_index,
+        circuits=tuple(circuits),
+        qubits=tuple(qubits),
+        shots=config.ramsey_shots,
+        measurement_key="ramsey",
+        metadata={
+            "technique": "transition_phase_ramsey",
+            "acquisition_index": acquisition_index,
+            "sequence": sequence.name,
+            "target_angle_rad": float(sequence.target_angle),
+            "constituent_angle_rad": float(sequence.constituent_angle),
+            "paper_phases_rad": [float(phase) for phase in sequence.phases],
+            "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
+            "analysis_phases_rad": [float(phase) for phase in config.ramsey_phases],
+            "amplitude_error": amplitude_error,
+            "detuning_hz": detuning_hz,
+            "qubits": list(qubits),
+            "shots": config.ramsey_shots,
+            "readout_calibration_shots": config.tomography_shots,
+            "prx_implementation": config.prx_implementation,
+            "fit_model": "offset + cosine*cos(phase) + sine*sin(phase)",
+        },
+        manifest=tuple(config.ramsey_phases),
+        sequence=sequence,
+        amplitude_error=amplitude_error,
+        detuning_hz=detuning_hz,
+    )
 
 
-def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
-    """Run Ramsey characterization over all configured sweeps and qubits.
-
-    Raw datasets and acquisition metadata are persisted before readout-corrected
-    fringes are fitted.  The returned table has one row per sequence, amplitude
-    error, detuning, and qubit combination.
-    """
-    rows: list[dict[str, ResultValue]] = []
-    acquisition_index = 0
+def build_batches(builder: ScheduleBuilder, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config) -> list[PlannedBatch]:
+    """Build every configured Ramsey batch without submitting work."""
+    batches: list[PlannedBatch] = []
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
-                dataset = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                persist_dataset(
-                    dataset,
-                    output_directory / f"raw_ramsey_{acquisition_index:04d}.nc",
-                    {
-                        "technique": "transition_phase_ramsey",
-                        "acquisition_index": acquisition_index,
-                        "sequence": sequence.name,
-                        "target_angle_rad": float(sequence.target_angle),
-                        "constituent_angle_rad": float(sequence.constituent_angle),
-                        "paper_phases_rad": [float(phase) for phase in sequence.phases],
-                        "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
-                        "analysis_phases_rad": [float(phase) for phase in config.ramsey_phases],
-                        "amplitude_error": amplitude_error,
-                        "detuning_hz": detuning_hz,
-                        "qubits": list(qubits),
-                        "shots": config.ramsey_shots,
-                        "readout_calibration_shots": config.tomography_shots,
-                        "prx_implementation": config.prx_implementation,
-                        "fit_model": "offset + cosine*cos(phase) + sine*sin(phase)",
-                        "readout_calibration": readout_calibration_metadata(readout),
-                    },
-                )
-                acquisition_index += 1
-                for q in qubits:
-                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
-                    calibration = readout[q]
-                    # Readout correction amplifies binomial noise by the inverse
-                    # confusion-matrix contrast; carry that factor into the
-                    # conservative fringe-identifiability estimate.
-                    readout_scale = 1.0 if calibration is None else 1.0 / abs(
-                        1 - calibration.p1_given_0 - calibration.p0_given_1
-                    )
-                    row.update(metrics(
-                        correct(p1_from_dataset(dataset, q, "ramsey"), calibration),
-                        sequence,
-                        config.ramsey_phases,
-                        config.ramsey_shots,
-                        readout_scale,
-                    ))
-                    rows.append(row)
+                batches.append(build_batch(builder, qubits, sequence, amplitude_error, detuning_hz, config, len(batches)))
+    return batches
+
+
+def analyze(acquisitions: Sequence[AcquiredBatch], readout: ReadoutMap) -> pd.DataFrame:
+    """Analyze acquired Ramsey batches after raw persistence.
+
+    Readout-corrected fringes are fitted. The returned table has one row per sequence, amplitude
+    error, detuning, and qubit combination.
+    """
+    rows: list[dict[str, ResultValue]] = []
+    for acquisition in acquisitions:
+        plan = acquisition.plan
+        sequence = plan.sequence
+        if plan.technique != "transition_phase_ramsey" or sequence is None:
+            raise ValueError(f"Unexpected Ramsey batch: {plan.batch_id}")
+        phases: Sequence[float] = plan.manifest
+        for q in plan.qubits:
+            row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": float(plan.amplitude_error), "detuning_hz": float(plan.detuning_hz)}
+            calibration = readout[q]
+            # Readout correction amplifies binomial noise by the inverse
+            # confusion-matrix contrast; carry that factor into the
+            # conservative fringe-identifiability estimate.
+            readout_scale = 1.0 if calibration is None else 1.0 / abs(
+                1 - calibration.p1_given_0 - calibration.p0_given_1
+            )
+            row.update(metrics(
+                correct(p1_from_dataset(acquisition.dataset, q, plan.measurement_key), calibration),
+                sequence,
+                phases,
+                plan.shots,
+                readout_scale,
+            ))
+            rows.append(row)
     return pd.DataFrame(rows)
 
 

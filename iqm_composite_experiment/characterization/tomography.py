@@ -4,21 +4,17 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Literal, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from iqm.cpc.compiler.compiler import Compiler
 from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.timebox import TimeBox
 from scipy.spatial.transform import Rotation
-from xarray import Dataset
 
 from common import (
     Config,
-    Pulla,
     ReadoutMap,
     SequenceSpec,
     calibrated_prx,
@@ -27,10 +23,8 @@ from common import (
     measured_parallel_circuit,
     paper_phase_to_iqm,
     p1_from_dataset,
-    readout_calibration_metadata,
-    run_batch,
 )
-from dataset_persistence import persist_dataset
+from execution import AcquiredBatch, PlannedBatch
 
 TomographyInput: TypeAlias = Literal["0", "1", "+x", "+y"]
 TomographyBasis: TypeAlias = Literal["x", "y", "z"]
@@ -41,25 +35,23 @@ TOMO_INPUTS: tuple[TomographyInput, ...] = ("0", "1", "+x", "+y")
 TOMO_BASES: tuple[TomographyBasis, ...] = ("x", "y", "z")
 
 
-def acquire(
-    pulla: Pulla,
-    compiler: Compiler,
+def build_batch(
+    builder: ScheduleBuilder,
     qubits: Sequence[str],
     sequence: SequenceSpec,
     amplitude_error: float,
     detuning_hz: float,
     config: Config,
-) -> tuple[Dataset, list[TomographyCoordinate]]:
-    """Acquire the 12 circuits needed for single-qubit process tomography.
+    acquisition_index: int,
+) -> PlannedBatch:
+    """Build the 12 circuits needed for one tomography sweep point.
 
     For each of the four input states ``|0>``, ``|1>``, ``|+x>``, and ``|+y>``,
     the circuit applies the composite gate and measures its output along x, y,
-    and z.  ``metadata`` records those coordinates in exactly the same order as
-    the circuit results in the returned dataset.
+    and z. The manifest records coordinates in circuit-result order.
     """
-    builder = compiler.get_schedule_builder()
     circuits: list[TimeBox] = []
-    metadata: list[TomographyCoordinate] = []
+    coordinates: list[TomographyCoordinate] = []
     for state in TOMO_INPUTS:
         for basis in TOMO_BASES:
             operations: dict[str, list[TimeBox]] = {
@@ -71,61 +63,97 @@ def acquire(
                 for q in qubits
             }
             circuits.append(measured_parallel_circuit(builder, qubits, operations, "tomo"))
-            metadata.append((state, basis))
-    return run_batch(pulla, compiler, circuits, qubits, config.tomography_shots), metadata
+            coordinates.append((state, basis))
+    return PlannedBatch(
+        batch_id=f"tomography_{acquisition_index:04d}",
+        technique="process_tomography",
+        acquisition_index=acquisition_index,
+        circuits=tuple(circuits),
+        qubits=tuple(qubits),
+        shots=config.tomography_shots,
+        measurement_key="tomo",
+        metadata={
+            "technique": "process_tomography",
+            "acquisition_index": acquisition_index,
+            "sequence": sequence.name,
+            "target_angle_rad": float(sequence.target_angle),
+            "constituent_angle_rad": float(sequence.constituent_angle),
+            "paper_phases_rad": [float(phase) for phase in sequence.phases],
+            "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
+            "amplitude_error": amplitude_error,
+            "detuning_hz": detuning_hz,
+            "qubits": list(qubits),
+            "shots": config.tomography_shots,
+            "readout_calibration_shots": config.tomography_shots,
+            "prx_implementation": config.prx_implementation,
+            "reconstruction": "trace_preserving_linear_inversion",
+            "circuit_coordinates": [
+                {"input_state": state, "measurement_basis": basis}
+                for state, basis in coordinates
+            ],
+        },
+        manifest=tuple(coordinates),
+        sequence=sequence,
+        amplitude_error=amplitude_error,
+        detuning_hz=detuning_hz,
+    )
 
 
-def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
-    """Run process tomography over every configured sequence and sweep point.
+def build_batches(
+    builder: ScheduleBuilder,
+    qubits: Sequence[str],
+    sequences: Sequence[SequenceSpec],
+    config: Config,
+) -> list[PlannedBatch]:
+    """Build every configured tomography batch without submitting work."""
+    batches: list[PlannedBatch] = []
+    for sequence in sequences:
+        for amplitude_error in config.amplitude_errors:
+            for detuning_hz in config.detunings_hz:
+                batches.append(build_batch(
+                    builder,
+                    qubits,
+                    sequence,
+                    amplitude_error,
+                    detuning_hz,
+                    config,
+                    len(batches),
+                ))
+    return batches
 
-    Raw acquisitions are persisted before each qubit's corrected probabilities
-    are converted into an affine Bloch map and Pauli-transfer matrix (PTM).  The
+
+def analyze(
+    acquisitions: Sequence[AcquiredBatch],
+    readout: ReadoutMap,
+) -> pd.DataFrame:
+    """Analyze process-tomography batches after raw persistence.
+
+    Corrected probabilities are converted into an affine Bloch map and
+    Pauli-transfer matrix (PTM). The
     returned table contains the PTM, translation, fidelity, effective rotation,
     and non-unitary-distortion diagnostics for each qubit and setting.
     """
     rows: list[dict[str, ResultValue]] = []
-    acquisition_index = 0
-    for sequence in sequences:
-        for amplitude_error in config.amplitude_errors:
-            for detuning_hz in config.detunings_hz:
-                dataset, metadata = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                persist_dataset(
-                    dataset,
-                    output_directory / f"raw_tomography_{acquisition_index:04d}.nc",
-                    {
-                        "technique": "process_tomography",
-                        "acquisition_index": acquisition_index,
-                        "sequence": sequence.name,
-                        "target_angle_rad": float(sequence.target_angle),
-                        "constituent_angle_rad": float(sequence.constituent_angle),
-                        "paper_phases_rad": [float(phase) for phase in sequence.phases],
-                        "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
-                        "amplitude_error": amplitude_error,
-                        "detuning_hz": detuning_hz,
-                        "qubits": list(qubits),
-                        "shots": config.tomography_shots,
-                        "readout_calibration_shots": config.tomography_shots,
-                        "prx_implementation": config.prx_implementation,
-                        "reconstruction": "trace_preserving_linear_inversion",
-                        "readout_calibration": readout_calibration_metadata(readout),
-                        "circuit_coordinates": [
-                            {"input_state": state, "measurement_basis": basis}
-                            for state, basis in metadata
-                        ],
-                    },
-                )
-                acquisition_index += 1
-                for q in qubits:
-                    p1 = correct(p1_from_dataset(dataset, q, "tomo"), readout[q])
-                    ptm, bloch, translation = reconstruct_ptm(p1, metadata)
-                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz, "translation_x": float(translation[0]), "translation_y": float(translation[1]), "translation_z": float(translation[2])}
-                    row.update({
-                        f"ptm_{i}{j}": float(ptm[i, j])
-                        for i in range(4)
-                        for j in range(4)
-                    })
-                    row.update(metrics(ptm, bloch, sequence.target_angle))
-                    rows.append(row)
+    for acquisition in acquisitions:
+        plan = acquisition.plan
+        sequence = plan.sequence
+        if plan.technique != "process_tomography" or sequence is None:
+            raise ValueError(f"Unexpected tomography batch: {plan.batch_id}")
+        coordinates: Sequence[TomographyCoordinate] = plan.manifest
+        for q in plan.qubits:
+            p1 = correct(
+                p1_from_dataset(acquisition.dataset, q, plan.measurement_key),
+                readout[q],
+            )
+            ptm, bloch, translation = reconstruct_ptm(p1, coordinates)
+            row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": float(plan.amplitude_error), "detuning_hz": float(plan.detuning_hz), "translation_x": float(translation[0]), "translation_y": float(translation[1]), "translation_z": float(translation[2])}
+            row.update({
+                f"ptm_{i}{j}": float(ptm[i, j])
+                for i in range(4)
+                for j in range(4)
+            })
+            row.update(metrics(ptm, bloch, sequence.target_angle))
+            rows.append(row)
     return pd.DataFrame(rows)
 
 

@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Literal, TypeAlias, TypedDict
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from iqm.cpc.compiler.compiler import Compiler
 from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.timebox import TimeBox
 from scipy.optimize import curve_fit
-from xarray import Dataset
 
 
 from common import (
     Clifford,
     Config,
-    Pulla,
     ReadoutMap,
     SequenceSpec,
     calibrated_prx,
@@ -29,11 +25,9 @@ from common import (
     paper_phase_to_iqm,
     p1_from_dataset,
     prx_matrix,
-    readout_calibration_metadata,
-    run_batch,
     same_unitary,
 )
-from dataset_persistence import persist_dataset
+from execution import AcquiredBatch, PlannedBatch
 
 
 class RBPlanItem(TypedDict):
@@ -49,16 +43,15 @@ class RBPlanItem(TypedDict):
 ResultValue: TypeAlias = str | int | float | bool
 
 
-def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config) -> tuple[Dataset, list[RBPlanItem]]:
-    """Acquire reference and interleaved RB circuits for one sweep point.
+def build_batch(builder: ScheduleBuilder, qubits: Sequence[str], sequence: SequenceSpec, amplitude_error: float, detuning_hz: float, config: Config, acquisition_index: int) -> PlannedBatch:
+    """Build reference and interleaved RB circuits for one sweep point.
 
     Reference circuits contain random single-qubit Cliffords followed by their
     recovery.  Interleaved circuits use the same random Cliffords, insert the
     physical composite gate after each one, and use a recovery computed from
-    the sequence's ideal target.  The returned plan maps every dataset entry to
-    its circuit kind, length, sample, random indices, and recovery.
+    the sequence's ideal target. The manifest maps every circuit result to its
+    kind, length, sample, random indices, and recovery.
     """
-    builder = compiler.get_schedule_builder()
     rb_plan, group = plan(sequence, config)
     circuits: list[TimeBox] = []
     for item in rb_plan:
@@ -74,50 +67,69 @@ def acquire(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequence: S
             ops += clifford_pulses(builder, q, group[item["recovery"]], config)
             operations[q] = ops
         circuits.append(measured_parallel_circuit(builder, qubits, operations, "rb"))
-    return run_batch(pulla, compiler, circuits, qubits, config.rb_shots), rb_plan
+    return PlannedBatch(
+        batch_id=f"rb_{acquisition_index:04d}",
+        technique="interleaved_randomized_benchmarking",
+        acquisition_index=acquisition_index,
+        circuits=tuple(circuits),
+        qubits=tuple(qubits),
+        shots=config.rb_shots,
+        measurement_key="rb",
+        metadata={
+            "technique": "interleaved_randomized_benchmarking",
+            "acquisition_index": acquisition_index,
+            "sequence": sequence.name,
+            "target_angle_rad": float(sequence.target_angle),
+            "constituent_angle_rad": float(sequence.constituent_angle),
+            "paper_phases_rad": [float(phase) for phase in sequence.phases],
+            "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
+            "amplitude_error": amplitude_error,
+            "detuning_hz": detuning_hz,
+            "qubits": list(qubits),
+            "shots": config.rb_shots,
+            "readout_calibration_shots": config.tomography_shots,
+            "seed": config.seed,
+            "prx_implementation": config.prx_implementation,
+            "fit_model": "amplitude * decay**length + offset",
+            "rb_plan": rb_plan,
+        },
+        manifest=tuple(rb_plan),
+        sequence=sequence,
+        amplitude_error=amplitude_error,
+        detuning_hz=detuning_hz,
+    )
 
 
-def run(pulla: Pulla, compiler: Compiler, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config, readout: ReadoutMap, output_directory: Path) -> pd.DataFrame:
-    """Run interleaved RB over all configured sequences and error settings.
-
-    Each acquisition is persisted with the complete random-circuit plan so it
-    can be reproduced.  Readout-corrected results are reduced to one row of
-    reference, interleaved, and inferred gate-decay metrics per qubit.
-    """
-    rows: list[dict[str, ResultValue]] = []
-    acquisition_index = 0
+def build_batches(builder: ScheduleBuilder, qubits: Sequence[str], sequences: Sequence[SequenceSpec], config: Config) -> list[PlannedBatch]:
+    """Build every configured RB batch without submitting work."""
+    batches: list[PlannedBatch] = []
     for sequence in sequences:
         for amplitude_error in config.amplitude_errors:
             for detuning_hz in config.detunings_hz:
-                dataset, rb_plan = acquire(pulla, compiler, qubits, sequence, amplitude_error, detuning_hz, config)
-                persist_dataset(
-                    dataset,
-                    output_directory / f"raw_rb_{acquisition_index:04d}.nc",
-                    {
-                        "technique": "interleaved_randomized_benchmarking",
-                        "acquisition_index": acquisition_index,
-                        "sequence": sequence.name,
-                        "target_angle_rad": float(sequence.target_angle),
-                        "constituent_angle_rad": float(sequence.constituent_angle),
-                        "paper_phases_rad": [float(phase) for phase in sequence.phases],
-                        "iqm_phases_rad": [paper_phase_to_iqm(phase) for phase in sequence.phases],
-                        "amplitude_error": amplitude_error,
-                        "detuning_hz": detuning_hz,
-                        "qubits": list(qubits),
-                        "shots": config.rb_shots,
-                        "readout_calibration_shots": config.tomography_shots,
-                        "seed": config.seed,
-                        "prx_implementation": config.prx_implementation,
-                        "fit_model": "amplitude * decay**length + offset",
-                        "readout_calibration": readout_calibration_metadata(readout),
-                        "rb_plan": rb_plan,
-                    },
-                )
-                acquisition_index += 1
-                for q in qubits:
-                    row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": amplitude_error, "detuning_hz": detuning_hz}
-                    row.update(metrics(correct(p1_from_dataset(dataset, q, "rb"), readout[q]), rb_plan))
-                    rows.append(row)
+                batches.append(build_batch(builder, qubits, sequence, amplitude_error, detuning_hz, config, len(batches)))
+    return batches
+
+
+def analyze(acquisitions: Sequence[AcquiredBatch], readout: ReadoutMap) -> pd.DataFrame:
+    """Analyze acquired interleaved-RB batches after raw persistence.
+
+    Readout-corrected results are reduced to one row of
+    reference, interleaved, and inferred gate-decay metrics per qubit.
+    """
+    rows: list[dict[str, ResultValue]] = []
+    for acquisition in acquisitions:
+        plan = acquisition.plan
+        sequence = plan.sequence
+        if plan.technique != "interleaved_randomized_benchmarking" or sequence is None:
+            raise ValueError(f"Unexpected RB batch: {plan.batch_id}")
+        rb_plan: Sequence[RBPlanItem] = plan.manifest
+        for q in plan.qubits:
+            row: dict[str, ResultValue] = {"sequence": sequence.name, "pulse_count": len(sequence.phases), "qubit": q, "amplitude_error": float(plan.amplitude_error), "detuning_hz": float(plan.detuning_hz)}
+            row.update(metrics(
+                correct(p1_from_dataset(acquisition.dataset, q, plan.measurement_key), readout[q]),
+                rb_plan,
+            ))
+            rows.append(row)
     return pd.DataFrame(rows)
 
 

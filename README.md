@@ -41,6 +41,17 @@ datasets, acquisition metadata, and CSV summaries under `results/`.
 python iqm_composite_experiment/main.py
 ```
 
+All circuits are built and compiled before the first job is submitted. The run
+directory contains `preflight.json` with IQM's estimated QPU runtime and a
+`playlists/` directory with HTML circuit visualizations. Queue and network time
+are not included in the estimate.
+
+To generate these preflight artifacts without submitting any jobs:
+
+```bash
+python iqm_composite_experiment/main.py --prepare-only
+```
+
 The analytic X5 and X9 phases are represented from their exact formulas. Longer
 numerical phase vectors use the six-decimal values published in Tables I and II
 of `references/Universal_Gates.pdf`; reproducing the paper's machine-precision

@@ -10,17 +10,15 @@ from typing import TypeAlias
 
 import numpy as np
 import numpy.typing as npt
-from iqm.cpc.compiler.compiler import Compiler
-from iqm.cpc.core.run_result import RunResult
 from iqm.pulla.pulla import Pulla
 from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.gates.prx import PrxGateImplementation
 from iqm.pulse.playlist.instructions import IQPulse, Instruction
 from iqm.pulse.playlist.schedule import Schedule, Segment
 from iqm.pulse.timebox import TimeBox
-from iqm.station_control.interface.models import RunDefinition
 from xarray import Dataset
 
+from execution import PlannedBatch
 from sequences import SequenceSpec, built_in_sequences
 
 
@@ -132,28 +130,6 @@ def select_qubits(pulla: Pulla, requested: Sequence[str] | None) -> tuple[str, .
     if missing:
         raise ValueError(f"Unknown qubits: {missing}")
     return tuple(requested)
-
-
-def run_batch(
-    pulla: Pulla,
-    compiler: Compiler,
-    circuits: Sequence[TimeBox],
-    qubits: Sequence[str],
-    shots: int,
-) -> Dataset:
-    settings = compiler.get_settings(timeboxes=list(circuits))
-    settings.set_shots(shots)
-    run_definition, context = compiler.compile(
-        timeboxes=list(circuits), components=list(qubits), settings=settings,
-    )
-    if not isinstance(run_definition, RunDefinition):
-        raise TypeError("Compiler did not produce an IQM RunDefinition.")
-    job = pulla.submit_playlist(run_definition, context=context)
-    job.wait_for_completion()
-    result = job.result(compiler=compiler)
-    if not isinstance(result, RunResult):
-        raise RuntimeError("IQM job completed without an EXA-style RunResult.")
-    return result.dataset
 
 
 def p1_from_dataset(
@@ -384,29 +360,50 @@ def measured_parallel_circuit(
     return measurement
 
 
-def readout_calibration(
-    pulla: Pulla,
-    compiler: Compiler,
+def build_readout_batch(
+    builder: ScheduleBuilder,
     qubits: Sequence[str],
     config: Config,
-) -> dict[str, ReadoutCalibration | None]:
+) -> PlannedBatch | None:
+    """Build readout-calibration circuits without compiling or submitting."""
     if not config.readout_correction:
-        return {q: None for q in qubits}
-    builder = compiler.get_schedule_builder()
+        return None
     ground: dict[str, list[TimeBox]] = {q: [] for q in qubits}
     excited: dict[str, list[TimeBox]] = {
         q: [calibrated_prx(builder, q, np.pi, 0, config)] for q in qubits
     }
-    dataset = run_batch(
-        pulla,
-        compiler,
-        [
+    return PlannedBatch(
+        batch_id="readout_0000",
+        technique="readout_calibration",
+        acquisition_index=0,
+        circuits=(
             measured_parallel_circuit(builder, qubits, ground, "ro"),
             measured_parallel_circuit(builder, qubits, excited, "ro"),
-        ],
-        qubits,
-        config.tomography_shots,
+        ),
+        qubits=tuple(qubits),
+        shots=config.tomography_shots,
+        measurement_key="ro",
+        metadata={
+            "technique": "readout_calibration",
+            "acquisition_index": 0,
+            "qubits": list(qubits),
+            "shots": config.tomography_shots,
+            "states": ["ground", "excited"],
+            "prx_implementation": config.prx_implementation,
+        },
     )
+
+
+def readout_calibration_from_dataset(
+    dataset: Dataset | None,
+    qubits: Sequence[str],
+    config: Config,
+) -> dict[str, ReadoutCalibration | None]:
+    """Derive readout-confusion parameters from the planned calibration."""
+    if not config.readout_correction:
+        return {q: None for q in qubits}
+    if dataset is None:
+        raise ValueError("Readout correction is enabled but no calibration result exists.")
     result: dict[str, ReadoutCalibration | None] = {}
     for q in qubits:
         p1 = p1_from_dataset(dataset, q, "ro")
