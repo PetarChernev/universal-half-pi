@@ -57,6 +57,16 @@ To generate these preflight artifacts without submitting any jobs:
 python iqm_composite_experiment/main.py --prepare-only
 ```
 
+`Config.qubits` accepts an explicit tuple of qubit names, `None` for every
+qubit, or an integer count. An integer selects that many qubits by minimizing
+connections within the selected subset, then using the configured quality
+metric and graph separation to break ties. Supported metrics are
+`prx_fidelity`, `readout_fidelity`, `t1`, and `t2`:
+
+```python
+Config(qubits=8, qubit_selection_metric="t2")
+```
+
 The analytic X5 and X9 phases are represented from their exact formulas. Longer
 numerical phase vectors use the six-decimal values published in Tables I and II
 of `references/Universal_Gates.pdf`; reproducing the paper's machine-precision

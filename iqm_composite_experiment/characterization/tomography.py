@@ -14,7 +14,6 @@ from iqm.pulse.timebox import TimeBox
 from scipy.spatial.transform import Rotation
 
 from common import (
-    Config,
     ReadoutMap,
     SequenceSpec,
     calibrated_prx,
@@ -24,6 +23,7 @@ from common import (
     paper_phase_to_iqm,
     p1_from_dataset,
 )
+from config import Config
 from execution import AcquiredBatch, PlannedBatch
 
 TomographyInput: TypeAlias = Literal["0", "1", "+x", "+y"]

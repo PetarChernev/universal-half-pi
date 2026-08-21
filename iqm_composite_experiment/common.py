@@ -1,4 +1,4 @@
-"""Shared configuration, pulse construction, and execution helpers."""
+"""Shared pulse construction and execution helpers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from typing import TypeAlias
 
 import numpy as np
 import numpy.typing as npt
-from iqm.pulla.pulla import Pulla
 from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.gates.prx import PrxGateImplementation
 from iqm.pulse.playlist.instructions import IQPulse, Instruction
@@ -18,29 +17,12 @@ from iqm.pulse.playlist.schedule import Schedule, Segment
 from iqm.pulse.timebox import TimeBox
 from xarray import Dataset
 
+from config import Config
 from execution import PlannedBatch
 from sequences import SequenceSpec, built_in_sequences
 
 
 TimeBoxLike: TypeAlias = TimeBox | Iterable[TimeBox]
-
-
-@dataclass(frozen=True)
-class Config:
-    qubits: tuple[str, ...] | None = None
-    amplitude_errors: tuple[float, ...] = (0.0,)
-    detunings_hz: tuple[float, ...] = (0.0, 2e6)
-    ramsey_phases: tuple[float, ...] = tuple(np.linspace(0, 2 * np.pi, 5)[:-1])
-    tomography_shots: int = 100
-    ramsey_shots: int = 50
-    rb_shots: int = 50
-    rb_lengths: tuple[int, ...] = (1, 2, 4, 8)
-    rb_samples: int = 2
-    seed: int = 7
-    prx_implementation: str | None = None
-    pre_calibration: bool = False
-    post_calibration: bool = False
-
 
 @dataclass(frozen=True)
 class ReadoutCalibration:
@@ -120,17 +102,6 @@ def parallel(boxes: Iterable[TimeBox]) -> TimeBox:
     if not boxes:
         raise ValueError("Cannot parallelize an empty list.")
     return TimeBox.composite(boxes)
-
-
-def select_qubits(pulla: Pulla, requested: Sequence[str] | None) -> tuple[str, ...]:
-    topology = pulla.get_chip_topology()
-    all_qubits = tuple(getattr(topology, "qubits_sorted", sorted(topology.qubits)))
-    if requested is None:
-        return all_qubits
-    missing = sorted(set(requested) - set(all_qubits))
-    if missing:
-        raise ValueError(f"Unknown qubits: {missing}")
-    return tuple(requested)
 
 
 def p1_from_dataset(

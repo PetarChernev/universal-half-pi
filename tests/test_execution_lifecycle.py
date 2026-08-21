@@ -16,7 +16,7 @@ sys.path.insert(0, str(PACKAGE_DIRECTORY))
 
 import execution  # noqa: E402
 import main as experiment_main  # noqa: E402
-from common import Config  # noqa: E402
+from config import Config  # noqa: E402
 from execution import CompiledJob, PlannedBatch, PlannedJob  # noqa: E402
 
 

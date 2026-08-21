@@ -15,7 +15,6 @@ from scipy.optimize import curve_fit
 
 from common import (
     Clifford,
-    Config,
     ReadoutMap,
     SequenceSpec,
     calibrated_prx,
@@ -27,6 +26,7 @@ from common import (
     prx_matrix,
     same_unitary,
 )
+from config import Config
 from execution import AcquiredBatch, PlannedBatch
 
 

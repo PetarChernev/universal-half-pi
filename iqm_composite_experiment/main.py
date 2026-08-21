@@ -8,20 +8,22 @@ from datetime import datetime
 import logging
 from pathlib import Path
 
+from exa.common.errors.iqm_error import IQMError
 from iqm.cpc.compiler.compiler import Compiler
+from iqm.iqm_client import IQMClient
 from iqm.pulla.pulla import Pulla
 from iqm.pulse.builder import ScheduleBuilder
+from requests import RequestException
 
 from characterization import ramsey, rb, tomography
 from common import (
-    Config,
     ReadoutMap,
     build_readout_batch,
     built_in_sequences,
     readout_calibration_from_datasets,
     readout_calibration_metadata,
-    select_qubits,
 )
+from config import Config
 from dataset_persistence import persist_dataset, persist_metadata
 from execution import (
     AcquiredBatch,
@@ -32,6 +34,7 @@ from execution import (
     execute_jobs,
     write_preflight,
 )
+from qubit_selection import select_qubits
 from sequences import SequenceSpec
 
 
@@ -294,11 +297,28 @@ def run_compiled_experiment(
 def main(*, prepare_only: bool = False) -> Path:
     registry = built_in_sequences()
     config = Config(qubits=None)
-    sequences = [registry['H1'], registry["H11a"]]
+    sequences = [registry['H1'], registry["H21b"]]
 
-    pulla = Pulla(quantum_computer="garnet")
+    quantum_computer = "garnet"
+    pulla = Pulla(quantum_computer=quantum_computer)
     compiler = pulla.get_standard_compiler()
-    qubits = select_qubits(pulla, config.qubits)
+    metric_client = None
+    if type(config.qubits) is int:
+        try:
+            metric_client = IQMClient(quantum_computer=quantum_computer)
+        except (IQMError, RequestException, ValueError) as error:
+            logger.warning(
+                "Could not initialize the IQM metric client; "
+                "using graph separation: %s",
+                error,
+            )
+    qubits = select_qubits(
+        pulla,
+        config.qubits,
+        selection_metric=config.qubit_selection_metric,
+        metric_client=metric_client,
+        prx_implementation=config.prx_implementation,
+    )
 
     # No authorization-dependent submission occurs until every batch has been
     # materialized, compiled, plotted, and included in the runtime estimate.

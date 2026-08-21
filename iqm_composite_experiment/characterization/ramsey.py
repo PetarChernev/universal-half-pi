@@ -12,7 +12,8 @@ import pandas as pd
 from iqm.pulse.builder import ScheduleBuilder
 from iqm.pulse.timebox import TimeBox
 
-from common import Config, ReadoutMap, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, wrap
+from common import ReadoutMap, SequenceSpec, calibrated_prx, composite_gate, correct, measured_parallel_circuit, paper_phase_to_iqm, p1_from_dataset, prx_matrix, wrap
+from config import Config
 from execution import AcquiredBatch, PlannedBatch
 
 
