@@ -41,10 +41,15 @@ datasets, acquisition metadata, and CSV summaries under `results/`.
 python iqm_composite_experiment/main.py
 ```
 
-All circuits are built and compiled before the first job is submitted. The run
-directory contains `preflight.json` with IQM's estimated QPU runtime and a
-`playlists/` directory with HTML circuit visualizations. Queue and network time
-are not included in the estimate.
+All circuits are built and compiled before the first job is submitted. Each
+enabled characterization technique is submitted as one job. Depending on
+`Config.pre_calibration` and `Config.post_calibration`, that job includes a
+ground/excited readout calibration before and/or after its characterization
+circuits. If both flags are false, analysis skips readout correction.
+
+The run directory contains `preflight.json` with IQM's estimated QPU runtime
+and a `playlists/` directory with one HTML visualization per technique job.
+Queue and network time are not included in the estimate.
 
 To generate these preflight artifacts without submitting any jobs:
 

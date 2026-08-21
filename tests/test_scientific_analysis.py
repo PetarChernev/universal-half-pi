@@ -9,13 +9,19 @@ import unittest
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+import xarray as xr
 
 
 PACKAGE_DIRECTORY = Path(__file__).resolve().parents[1] / "iqm_composite_experiment"
 sys.path.insert(0, str(PACKAGE_DIRECTORY))
 
 from characterization import ramsey, rb, tomography  # noqa: E402
-from common import paper_phase_to_iqm, prx_matrix, same_unitary  # noqa: E402
+from common import (  # noqa: E402
+    paper_phase_to_iqm,
+    prx_matrix,
+    readout_calibration_from_datasets,
+    same_unitary,
+)
 from dataset_persistence import persist_dataset  # noqa: E402
 from sequences import SequenceSpec, built_in_sequences  # noqa: E402
 
@@ -121,20 +127,51 @@ class RamseyMetricTests(unittest.TestCase):
 
 class PersistenceTests(unittest.TestCase):
     def test_dataset_metadata_is_written_beside_raw_data(self) -> None:
-        class FakeDataset:
-            def to_netcdf(self, path: Path) -> None:
-                path.write_bytes(b"raw")
+        dataset = xr.Dataset(
+            {"value": ("circuit_index", np.array([1.0, 2.0]))},
+            coords={"circuit_index": [0, 1]},
+        )
+        dataset["value"].attrs["parameter"] = object()
+        dataset["circuit_index"].attrs["parameter"] = object()
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "acquisition.nc"
             metadata = {"technique": "test", "coordinates": [1, 2]}
-            persist_dataset(FakeDataset(), path, metadata)
+            persist_dataset(dataset, path, metadata)
 
-            self.assertEqual(path.read_bytes(), b"raw")
+            with xr.open_dataset(path) as restored:
+                np.testing.assert_array_equal(restored["value"], [1.0, 2.0])
+                self.assertEqual(restored["value"].attrs, {})
+                self.assertEqual(restored["circuit_index"].attrs, {})
             self.assertEqual(
                 json.loads(path.with_suffix(".json").read_text()),
                 metadata,
             )
+            self.assertIn("parameter", dataset["value"].attrs)
+
+
+class ReadoutCalibrationTests(unittest.TestCase):
+    def test_pre_and_post_calibrations_are_averaged(self) -> None:
+        variable = "QB1__tomo_excited_state_probability"
+        pre = xr.Dataset({variable: ("circuit_index", [0.1, 0.8])})
+        post = xr.Dataset({variable: ("circuit_index", [0.2, 0.9])})
+
+        result = readout_calibration_from_datasets(
+            ((pre, "tomo"), (post, "tomo")),
+            ("QB1",),
+        )
+
+        calibration = result["QB1"]
+        self.assertIsNotNone(calibration)
+        assert calibration is not None
+        self.assertAlmostEqual(calibration.p1_given_0, 0.15)
+        self.assertAlmostEqual(calibration.p0_given_1, 0.15)
+
+    def test_no_calibration_disables_readout_correction(self) -> None:
+        self.assertEqual(
+            readout_calibration_from_datasets((), ("QB1", "QB2")),
+            {"QB1": None, "QB2": None},
+        )
 
 
 class RandomizedBenchmarkingMetricTests(unittest.TestCase):

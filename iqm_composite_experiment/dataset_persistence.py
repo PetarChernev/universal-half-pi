@@ -27,7 +27,7 @@ def persist_dataset(
     metadata: Mapping[str, JsonValue],
 ) -> None:
     """Write an acquisition dataset and a JSON description of its circuits."""
-    dataset.to_netcdf(path)
+    dataset.drop_attrs(deep=True).to_netcdf(path)
     persist_metadata(path, metadata)
 
 

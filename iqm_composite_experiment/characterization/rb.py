@@ -87,7 +87,13 @@ def build_batch(builder: ScheduleBuilder, qubits: Sequence[str], sequence: Seque
             "detuning_hz": detuning_hz,
             "qubits": list(qubits),
             "shots": config.rb_shots,
-            "readout_calibration_shots": config.tomography_shots,
+            "readout_calibration_shots": (
+                config.rb_shots
+                if config.pre_calibration or config.post_calibration
+                else None
+            ),
+            "pre_calibration": config.pre_calibration,
+            "post_calibration": config.post_calibration,
             "seed": config.seed,
             "prx_implementation": config.prx_implementation,
             "fit_model": "amplitude * decay**length + offset",

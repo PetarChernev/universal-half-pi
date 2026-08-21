@@ -29,16 +29,17 @@ TimeBoxLike: TypeAlias = TimeBox | Iterable[TimeBox]
 class Config:
     qubits: tuple[str, ...] | None = None
     amplitude_errors: tuple[float, ...] = (0.0,)
-    detunings_hz: tuple[float, ...] = (-2e6, 0.0, 2e6)
+    detunings_hz: tuple[float, ...] = (0.0, 2e6)
     ramsey_phases: tuple[float, ...] = tuple(np.linspace(0, 2 * np.pi, 5)[:-1])
-    tomography_shots: int = 50
+    tomography_shots: int = 100
     ramsey_shots: int = 50
     rb_shots: int = 50
     rb_lengths: tuple[int, ...] = (1, 2, 4, 8)
     rb_samples: int = 2
     seed: int = 7
     prx_implementation: str | None = None
-    readout_correction: bool = True
+    pre_calibration: bool = False
+    post_calibration: bool = False
 
 
 @dataclass(frozen=True)
@@ -364,50 +365,63 @@ def build_readout_batch(
     builder: ScheduleBuilder,
     qubits: Sequence[str],
     config: Config,
-) -> PlannedBatch | None:
+    *,
+    batch_id: str,
+    characterization_technique: str,
+    position: str,
+    shots: int,
+    measurement_key: str,
+) -> PlannedBatch:
     """Build readout-calibration circuits without compiling or submitting."""
-    if not config.readout_correction:
-        return None
     ground: dict[str, list[TimeBox]] = {q: [] for q in qubits}
     excited: dict[str, list[TimeBox]] = {
         q: [calibrated_prx(builder, q, np.pi, 0, config)] for q in qubits
     }
     return PlannedBatch(
-        batch_id="readout_0000",
+        batch_id=batch_id,
         technique="readout_calibration",
         acquisition_index=0,
         circuits=(
-            measured_parallel_circuit(builder, qubits, ground, "ro"),
-            measured_parallel_circuit(builder, qubits, excited, "ro"),
+            measured_parallel_circuit(builder, qubits, ground, measurement_key),
+            measured_parallel_circuit(builder, qubits, excited, measurement_key),
         ),
         qubits=tuple(qubits),
-        shots=config.tomography_shots,
-        measurement_key="ro",
+        shots=shots,
+        measurement_key=measurement_key,
         metadata={
             "technique": "readout_calibration",
             "acquisition_index": 0,
+            "characterization_technique": characterization_technique,
+            "calibration_position": position,
             "qubits": list(qubits),
-            "shots": config.tomography_shots,
+            "shots": shots,
             "states": ["ground", "excited"],
             "prx_implementation": config.prx_implementation,
         },
     )
 
 
-def readout_calibration_from_dataset(
-    dataset: Dataset | None,
+def readout_calibration_from_datasets(
+    calibrations: Sequence[tuple[Dataset, str]],
     qubits: Sequence[str],
-    config: Config,
 ) -> dict[str, ReadoutCalibration | None]:
-    """Derive readout-confusion parameters from the planned calibration."""
-    if not config.readout_correction:
+    """Average readout-confusion parameters from pre/post calibrations."""
+    if not calibrations:
         return {q: None for q in qubits}
-    if dataset is None:
-        raise ValueError("Readout correction is enabled but no calibration result exists.")
     result: dict[str, ReadoutCalibration | None] = {}
     for q in qubits:
-        p1 = p1_from_dataset(dataset, q, "ro")
-        result[q] = ReadoutCalibration(float(p1[0]), float(1-p1[1]))
+        probabilities = [
+            p1_from_dataset(dataset, q, measurement_key)
+            for dataset, measurement_key in calibrations
+        ]
+        if any(len(p1) != 2 for p1 in probabilities):
+            raise ValueError(
+                f"Readout calibration for {q} must contain ground and excited states."
+            )
+        result[q] = ReadoutCalibration(
+            float(np.mean([p1[0] for p1 in probabilities])),
+            float(np.mean([1 - p1[1] for p1 in probabilities])),
+        )
     return result
 
 
